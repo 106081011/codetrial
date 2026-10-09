@@ -4372,3 +4372,40 @@ fn http_diagnostic_walks_eight_sources_and_no_further() {
     assert_eq!(beyond["io_kind"], serde_json::Value::Null);
     assert_eq!(beyond["source_depth"], 8);
 }
+
+#[test]
+fn reconnect_setup_preserves_resolved_voice_and_accent() {
+    let config = live_config(&[("GEMINI_VOICE", "Aoede")]);
+    for voice in crate::agent::INTERVIEWER_VOICES {
+        for accent in crate::agent::INTERVIEWER_ACCENTS {
+            let boot = crate::runtime::bootstrap_with_rounds(
+                &config,
+                "room",
+                Some("two-sum"),
+                45,
+                crate::runtime::RuntimeOptions {
+                    voice: Some(voice),
+                    accent: Some(accent),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(boot.accent, Some(*accent));
+            for resume in [None, Some("resume-handle"), None] {
+                let setup = live_setup_message(&boot, resume);
+                assert_eq!(
+                    setup["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
+                        ["voiceName"],
+                    *voice
+                );
+                assert_eq!(
+                    setup["setup"]["systemInstruction"]["parts"][0]["text"],
+                    boot.instructions
+                );
+                assert!(
+                    boot.instructions
+                        .contains(&format!("natural {accent} accent"))
+                );
+            }
+        }
+    }
+}

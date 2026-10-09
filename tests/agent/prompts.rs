@@ -40,6 +40,45 @@ fn prompts_match_frozen_fixture() {
 }
 
 #[test]
+fn prompt_builder_appends_only_supported_accent_directions() {
+    let problem = get_problem(Some("two-sum"));
+    let baseline = build_instructions_for_plan(problem, 45, &Default::default());
+    assert!(!baseline.contains("[INTERVIEWER SPEAKING STYLE]"));
+
+    for accent in INTERVIEWER_ACCENTS {
+        let prompt = build_instructions_for_plan(
+            problem,
+            45,
+            &codetrial::runtime::RuntimeOptions {
+                accent: Some(accent),
+                ..Default::default()
+            },
+        );
+        assert!(prompt.starts_with(&baseline));
+        assert_eq!(prompt.matches("[INTERVIEWER SPEAKING STYLE]").count(), 1);
+        assert!(prompt.contains(&format!("Speak English with a natural {accent} accent.")));
+        assert!(prompt.contains(
+            "keep the interview content, assessment rules, and professional tone unchanged."
+        ));
+    }
+
+    for accent in [None, Some("Default"), Some("Random"), Some("unknown")] {
+        assert_eq!(
+            build_instructions_for_plan(
+                problem,
+                45,
+                &codetrial::runtime::RuntimeOptions {
+                    voice: Some("Puck"),
+                    accent,
+                    ..Default::default()
+                },
+            ),
+            baseline
+        );
+    }
+}
+
+#[test]
 fn whiteboard_instructions_keep_their_policy_with_editor_execution_disabled() {
     let problem = get_problem(Some("two-sum"));
     let options = codetrial::runtime::RuntimeOptions {
@@ -71,6 +110,8 @@ fn disabled_execution_prompts_request_traces_across_recovery_and_editor_events()
             get_problem(Some("two-sum")),
             45,
             &codetrial::runtime::RuntimeOptions {
+                voice: None,
+                accent: None,
                 profile: InterviewProfile::default(),
                 grounding: InterviewGrounding::default(),
                 interview_loop,
@@ -158,8 +199,8 @@ fn prompt_golden_digest_matches_versions() {
     // its hash is a string nothing checks. The pair is still asserted, because
     // the failure worth catching is a version bumped with the golden left
     // alone, which a digest comparison on its own reads as fine.
-    let recorded_versions = (24, 20);
-    let recorded_digest = "e8c59828e6c3f3a8b9fcf8841a35f7f77c21ed8b2501458bc43eb17641c99a02";
+    let recorded_versions = (25, 20);
+    let recorded_digest = "caaf4d7f81c8144938c574882724c9a50fbdd027129e8fd54c625099e5e7cae9";
 
     assert_eq!(
         (LIVE_PROMPT_VERSION, REPORT_PROMPT_VERSION),
@@ -571,6 +612,8 @@ fn document_grounding_requires_consent_and_is_bounded_as_untrusted_prompt_data()
         problem,
         45,
         &codetrial::runtime::RuntimeOptions {
+            voice: None,
+            accent: None,
             profile: InterviewProfile::default(),
             grounding: grounding.clone(),
             interview_loop: InterviewLoop::CodingBehavioral,
@@ -888,6 +931,8 @@ fn profile_text_is_bounded_and_prompt_context_cannot_change_the_coding_rubric() 
         problem,
         45,
         &codetrial::runtime::RuntimeOptions {
+            voice: None,
+            accent: None,
             profile: profile.clone(),
             grounding: InterviewGrounding::default(),
             interview_loop: InterviewLoop::CodingBehavioral,
@@ -934,6 +979,8 @@ fn hidden_examples_are_not_on_screen_for_the_interviewer() {
             get_problem(Some("surrounded-regions")),
             45,
             &codetrial::runtime::RuntimeOptions {
+                voice: None,
+                accent: None,
                 profile: InterviewProfile::default(),
                 grounding: InterviewGrounding::default(),
                 interview_loop: InterviewLoop::CodingBehavioral,
@@ -969,6 +1016,8 @@ fn coding_only_prompt_removes_the_behavioral_round_contract() {
         get_problem(Some("two-sum")),
         45,
         &codetrial::runtime::RuntimeOptions {
+            voice: None,
+            accent: None,
             profile: InterviewProfile::default(),
             grounding: InterviewGrounding::default(),
             interview_loop: InterviewLoop::CodingOnly,
@@ -989,6 +1038,8 @@ fn coding_only_prompt_removes_the_behavioral_round_contract() {
             get_problem(Some("two-sum")),
             45,
             &codetrial::runtime::RuntimeOptions {
+                voice: None,
+                accent: None,
                 profile: InterviewProfile::default(),
                 grounding: InterviewGrounding::default(),
                 interview_loop: InterviewLoop::CodingBehavioral,
@@ -1007,6 +1058,8 @@ fn coding_only_prompt_removes_the_behavioral_round_contract() {
         get_problem(Some("two-sum")),
         45,
         &codetrial::runtime::RuntimeOptions {
+            voice: None,
+            accent: None,
             profile: InterviewProfile::default(),
             grounding: (InterviewGrounding {
                 requirements: vec!["Owns incident response".to_string()],
@@ -1289,16 +1342,16 @@ fn interview_contract_versions_are_one_closed_bundle() {
         "the bundle table has no row for {INTERVIEW_CONTRACT_BUNDLE_VERSION}"
     );
 
-    assert_eq!(INTERVIEW_CONTRACT_BUNDLE_VERSION, 33);
-    assert_eq!(LIVE_PROMPT_VERSION, 24);
+    assert_eq!(INTERVIEW_CONTRACT_BUNDLE_VERSION, 34);
+    assert_eq!(LIVE_PROMPT_VERSION, 25);
     assert_eq!(REPORT_PROMPT_VERSION, 20);
     assert_eq!(RUBRIC_VERSION, 1);
     assert_eq!(REPORT_SCHEMA_VERSION, 3);
     assert_eq!(
         interview_contract_json(),
         json!({
-            "bundleVersion": 33,
-            "livePromptVersion": 24,
+            "bundleVersion": 34,
+            "livePromptVersion": 25,
             "reportPromptVersion": 20,
             "rubricVersion": 1,
             "reportSchemaVersion": 3,
