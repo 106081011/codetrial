@@ -27,8 +27,9 @@ after(async () => {
 });
 
 /// A page on the interview screen with an empty editor, no room joined. The
-/// editor is enabled as soon as bindEvents runs; nothing under test needs a
-/// live session, so this never waits on one.
+/// pause control is revealed by bindEvents after the starter buffer is seeded.
+/// The textarea starts enabled in HTML, so it cannot signal readiness. Nothing
+/// under test needs a live session, so this never waits on one.
 async function editorPage(t, { params = {}, beforeLoad } = {}) {
   if (!browser) {
     t.skip("playwright chromium unavailable");
@@ -50,7 +51,7 @@ async function editorPage(t, { params = {}, beforeLoad } = {}) {
   await page.goto(`${base}/interview.html?${query}`, {
     waitUntil: "domcontentloaded",
   });
-  await page.waitForSelector("#editor:not([disabled])");
+  await page.waitForSelector("#pause:not([hidden])");
   // The media preflight overlay sits over the editor until a candidate (or a
   // stubbed device) clears it, and it blocks Playwright's own click on
   // whatever is under it. A keystroke only needs the element focused, not
@@ -841,5 +842,59 @@ test("a proportional font keeps the textarea and highlight metrics aligned", asy
     } finally {
       await page.close();
     }
+  }
+});
+
+test("editor setup waits for delayed problem initialization before clearing the starter", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  let releaseProblem;
+  const problemReady = new Promise((resolve) => {
+    releaseProblem = resolve;
+  });
+  let problemRequested;
+  const requested = new Promise((resolve) => {
+    problemRequested = resolve;
+  });
+  let loadingPage;
+  let setupFinished = false;
+  const setup = editorPage(t, {
+    beforeLoad: async (page) => {
+      loadingPage = page;
+      await page.route(
+        "**/problems/chargeback-pair-match.json",
+        async (route) => {
+          problemRequested();
+          await problemReady;
+          await route.continue();
+        },
+      );
+    },
+  }).then((ctx) => {
+    setupFinished = true;
+    return ctx;
+  });
+  try {
+    await requested;
+    await loadingPage.waitForSelector("#editor:not([disabled])");
+    assert.equal(await loadingPage.locator("#pause").isVisible(), false);
+    // Recreate the old helper's sequence before the module can initialize.
+    await loadingPage.evaluate(() => document.querySelector("#editor").focus());
+    await loadingPage.keyboard.press("ControlOrMeta+A");
+    await loadingPage.keyboard.press("Delete");
+    assert.equal((await caretState(loadingPage)).value, "");
+    assert.equal(
+      setupFinished,
+      false,
+      "setup must wait for the starter buffer",
+    );
+    releaseProblem();
+    const { page, errors } = await setup;
+    await page.waitForSelector("#pause:not([hidden])");
+    assert.equal((await caretState(page)).value, "");
+    assert.deepEqual(errors, []);
+  } finally {
+    releaseProblem();
+    await setup.catch(() => {});
+    await loadingPage?.close();
   }
 });
