@@ -11,7 +11,9 @@ import {
   COMPILED_LANGUAGES,
   compilerType,
   generateHarness,
+  HARNESS_SIGNATURE_NOTE,
   harnessGap,
+  harnessLineOffset,
   languagesFor,
   mapCompilerResponse,
   nativeLiteral,
@@ -913,6 +915,523 @@ test("compiler output helpers parse results and map failures to setupError", () 
   assert.deepEqual(mapCompilerResponse({ stdout: "not json" }), {
     setupError: "The run produced no JSON results.",
   });
+});
+
+const compileError = (lines, editor) =>
+  mapCompilerResponse(
+    { didExecute: false, stderr: lines.map((text) => ({ text })) },
+    editor,
+  ).setupError;
+
+test("compile errors cite the editor line in C, C++, Java and a class judge", () => {
+  const code = ["public class Solution {", "  // first", "  BROKEN", "}"];
+  for (const [language, id] of [
+    ["c", "two-sum"],
+    ["cpp", "two-sum"],
+    ["java", "two-sum"],
+    ["cpp", "lru-cache"],
+    ["java", "lru-cache"],
+  ]) {
+    const spec = judges[id];
+    const source = generateHarness(language, spec, code.join("\n"));
+    const harnessLine = source.split("\n").indexOf("  BROKEN") + 1;
+    assert.ok(harnessLine > 3, `${language} ${id} has no prelude to remap`);
+    const position = language === "java" ? "" : "3:";
+    assert.equal(
+      compileError([`<source>:${harnessLine}:${position} error: x`], {
+        offset: harnessLineOffset(language, spec),
+        lineCount: code.length,
+      }),
+      `<source>:3:${position} error: x`,
+      `${language} ${id}`,
+    );
+  }
+});
+
+test("a public Java class split across lines keeps its line count", () => {
+  for (const id of ["two-sum", "lru-cache"]) {
+    const spec = judges[id];
+    const name = spec.kind === "class" ? spec.className : "Solution";
+    const code = ["public", `class ${name} {`, "  // first", "  BROKEN", "}"];
+    const source = generateHarness("java", spec, code.join("\n"));
+    assert.doesNotMatch(source, new RegExp(`public\\s+class\\s+${name}\\b`));
+    assert.equal(
+      source.split("\n").indexOf("  BROKEN") +
+        1 -
+        harnessLineOffset("java", spec),
+      4,
+      id,
+    );
+  }
+});
+
+// The outputs below are what Compiler Explorer returned for a missing `;` in
+// a 6-line C++, a 4-line C and a 6-line Java answer.
+test("an error inside the candidate's code keeps its excerpt, renumbered", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>: In member function 'bool Solution::settlesToOne(int)':",
+        "<source>:56:5: error: expected ';' before '}' token",
+        "   56 |     }",
+        "      |     ^",
+      ],
+      { offset: 51, lineCount: 6 },
+    ),
+    [
+      "<source>: In member function 'bool Solution::settlesToOne(int)':",
+      "<source>:5:5: error: expected ';' before '}' token",
+      "    5 |     }",
+      "      |     ^",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:40:17: error: expected ';' after return statement",
+        "   40 |     return false",
+        "      |                 ^",
+        "      |                 ;",
+        "1 error generated.",
+      ],
+      { offset: 37, lineCount: 4 },
+    ),
+    [
+      "<source>:3:17: error: expected ';' after return statement",
+      "    3 |     return false",
+      "      |                 ^",
+      "      |                 ;",
+      "1 error generated.",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:8: error: ';' expected",
+        "        return false",
+        "                    ^",
+        "1 error",
+      ],
+      { offset: 4, lineCount: 6 },
+    ),
+    [
+      "<source>:4: error: ';' expected",
+      "        return false",
+      "                    ^",
+      "1 error",
+    ].join("\n"),
+  );
+});
+
+test("an error in the harness names the harness and says why once", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>: In function 'int main()':",
+        "<source>:65:28: error: 'class Solution' has no member named 'settlesToOne'",
+        "   65 |     auto actual = solution.settlesToOne(n);",
+        "      |                            ^~~~~~~~~~~~",
+        "<source>:75:28: error: 'class Solution' has no member named 'settlesToOne'",
+        "   75 |     auto actual = solution.settlesToOne(n);",
+        "      |                            ^~~~~~~~~~~~",
+      ],
+      { offset: 51, lineCount: 6 },
+    ),
+    [
+      "<test harness>: In function 'int main()':",
+      "<test harness>: error: 'class Solution' has no member named 'settlesToOne'",
+      "<test harness>: error: 'class Solution' has no member named 'settlesToOne'",
+      HARNESS_SIGNATURE_NOTE,
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:45: error: cannot find symbol",
+        "      Object actual = solution.settlesToOne(n);",
+        "                              ^",
+        "  symbol:   method settlesToOne(int)",
+        "  location: variable solution of type Solution",
+        "<source>:55: error: cannot find symbol",
+        "      Object actual = solution.settlesToOne(n);",
+        "                              ^",
+        "  symbol:   method settlesToOne(int)",
+        "  location: variable solution of type Solution",
+        "5 errors",
+      ],
+      { offset: 4, lineCount: 6 },
+    ),
+    [
+      "<test harness>: error: cannot find symbol",
+      "  symbol:   method settlesToOne(int)",
+      "  location: variable solution of type Solution",
+      "<test harness>: error: cannot find symbol",
+      "  symbol:   method settlesToOne(int)",
+      "  location: variable solution of type Solution",
+      "5 errors",
+      HARNESS_SIGNATURE_NOTE,
+    ].join("\n"),
+  );
+});
+
+// clang's answer for a C function renamed to settlesTo, cut after the second
+// of five errors: the "declared here" excerpt starts on the candidate's first
+// line and runs down to the harness call.
+test("an excerpt keeps the candidate's lines and drops the harness ones", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>:50:19: error: call to undeclared function 'settlesToOne'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+        "   50 |     bool actual = settlesToOne(n);",
+        "      |                   ^",
+        "<source>:50:19: note: did you mean 'settlesTo'?",
+        "<source>:38:6: note: 'settlesTo' declared here",
+        "   38 | bool settlesTo(int n) {",
+        "      |      ^",
+        "   39 |     // Think out loud as you go!",
+        "   40 |     return false;",
+        "   41 | }",
+        "   42 | int main(void) {",
+        '   43 |   printf("{\\"results\\":[");',
+        "   44 |   ",
+        "   45 |   {",
+        "   46 |     int n = 19;",
+        "   47 |     int returnSize = 0;",
+        "   48 |     int* returnColumnSizes = NULL;",
+        "   49 |     clock_t start = clock();",
+        "   50 |     bool actual = settlesToOne(n);",
+        "      |                   ~~~~~~~~~~~~",
+        "      |                   settlesTo",
+        "<source>:62:19: error: call to undeclared function 'settlesToOne'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+        "   62 |     bool actual = settlesToOne(n);",
+        "      |                   ^",
+        "5 errors generated.",
+      ],
+      { offset: 37, lineCount: 4 },
+    ),
+    [
+      "<test harness>: error: call to undeclared function 'settlesToOne'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+      "<test harness>: note: did you mean 'settlesTo'?",
+      "<source>:1:6: note: 'settlesTo' declared here",
+      "    1 | bool settlesTo(int n) {",
+      "      |      ^",
+      "    2 |     // Think out loud as you go!",
+      "    3 |     return false;",
+      "    4 | }",
+      "<test harness>: error: call to undeclared function 'settlesToOne'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+      "5 errors generated.",
+      HARNESS_SIGNATURE_NOTE,
+    ].join("\n"),
+  );
+});
+
+// g++ 16's answer for a C++ function given a second parameter, cut after the
+// first of five errors. The bullet g++ prints is U+2022, built here so the
+// file stays ASCII.
+test("a candidate g++ lists under a harness error keeps its editor line", () => {
+  const bullet = String.fromCodePoint(0x2022);
+  assert.equal(
+    compileError(
+      [
+        "<source>: In function 'int main()':",
+        "<source>:66:40: error: no matching function for call to 'Solution::settlesToOne(int&)'",
+        "   66 |     auto actual = solution.settlesToOne(n);",
+        "      |                   ~~~~~~~~~~~~~~~~~~~~~^~~",
+        `  ${bullet} there is 1 candidate`,
+        `    ${bullet} candidate 1: 'bool Solution::settlesToOne(int, int)'`,
+        "      <source>:54:10:",
+        "         54 |     bool settlesToOne(int n, int m) {",
+        "            |          ^~~~~~~~~~~~",
+        `      ${bullet} candidate expects 2 arguments, 1 provided`,
+      ],
+      { offset: 51, lineCount: 8 },
+    ),
+    [
+      "<test harness>: In function 'int main()':",
+      "<test harness>: error: no matching function for call to 'Solution::settlesToOne(int&)'",
+      `  ${bullet} there is 1 candidate`,
+      `    ${bullet} candidate 1: 'bool Solution::settlesToOne(int, int)'`,
+      "      <source>:3:10:",
+      "          3 |     bool settlesToOne(int n, int m) {",
+      "            |          ^~~~~~~~~~~~",
+      `      ${bullet} candidate expects 2 arguments, 1 provided`,
+      HARNESS_SIGNATURE_NOTE,
+    ].join("\n"),
+  );
+});
+
+// g++ 16 on a 60-line C++ answer that hands std::sort a one-argument
+// comparator, cut to the include chain, the candidate's call and one error in
+// the library. Header line 91 less the offset is 40, inside the answer, so a
+// header excerpt that took the offset would read as the candidate's line.
+test("a library header keeps its own lines and the include chain is remapped", () => {
+  const header =
+    "/cefs/17/17a2c76db590a13a8a92c74c_consolidated/compilers_c++_x86_gcc_16.2.0/include/c++/16.2.0";
+  const bullet = String.fromCodePoint(0x2022);
+  const fromHeader = [
+    `${header}/bits/stl_algo.h:91:17: error: no match for call to '(Solution::settlesToOne(int)::<lambda(int)>) (int&, int&)'`,
+    "   91 |       if (__comp(*__a, *__b))",
+    "      |           ~~~~~~^~~~~~~~~~~~",
+    `  ${bullet} there are 2 candidates`,
+  ];
+  assert.equal(
+    compileError(
+      [
+        `In file included from ${header}/algorithm:63,`,
+        "                 from <source>:1:",
+        "<source>:57:13:   required from here",
+        "   57 |         sort(v.begin(), v.end(), [](int a) { return a; });",
+        "      |         ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+        ...fromHeader,
+        "    <source>:57:35:",
+        "       57 |         sort(v.begin(), v.end(), [](int a) { return a; });",
+        "          |                                   ^",
+      ],
+      { offset: 51, lineCount: 60 },
+    ),
+    [
+      `In file included from ${header}/algorithm:63,`,
+      "                 from <test harness>:",
+      "<source>:6:13:   required from here",
+      "    6 |         sort(v.begin(), v.end(), [](int a) { return a; });",
+      "      |         ~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+      ...fromHeader,
+      "    <source>:6:35:",
+      "        6 |         sort(v.begin(), v.end(), [](int a) { return a; });",
+      "          |                                   ^",
+    ].join("\n"),
+  );
+});
+
+// clang's answer for strlen given an int in a 5-line C answer: the note points
+// into the system header, whose excerpt stays as printed.
+test("a clang note in a system header is left as printed", () => {
+  const header = [
+    "/usr/include/string.h:407:35: note: passing argument to parameter '__s' here",
+    "  407 | extern size_t strlen (const char *__s)",
+    "      |                                   ^",
+  ];
+  assert.equal(
+    compileError(
+      [
+        "<source>:40:19: error: incompatible integer to pointer conversion passing 'int' to parameter of type 'const char *' [-Wint-conversion]",
+        "   40 |     return strlen(n) > 0;",
+        "      |                   ^",
+        ...header,
+        "1 error generated.",
+      ],
+      { offset: 37, lineCount: 5 },
+    ),
+    [
+      "<source>:3:19: error: incompatible integer to pointer conversion passing 'int' to parameter of type 'const char *' [-Wint-conversion]",
+      "    3 |     return strlen(n) > 0;",
+      "      |                   ^",
+      ...header,
+      "1 error generated.",
+    ].join("\n"),
+  );
+});
+
+// What clang, g++ and javac returned when the candidate added their own
+// `main` to an 8-line C and an 11-line C++ answer, and `class Main` to a
+// 10-line Java one: the harness's definition comes second, so it is the error.
+test("the candidate's own main earns no signature note", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>:46:5: error: redefinition of 'main'",
+        "   46 | int main(void) {",
+        "      |     ^",
+        "<source>:42:5: note: previous definition is here",
+        "   42 | int main(void) {",
+        "      |     ^",
+        "1 error generated.",
+      ],
+      { offset: 37, lineCount: 8 },
+    ),
+    [
+      "<test harness>: error: redefinition of 'main'",
+      "<source>:5:5: note: previous definition is here",
+      "    5 | int main(void) {",
+      "      |     ^",
+      "1 error generated.",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:63:5: error: redefinition of 'int main()'",
+        "   63 | int main() {",
+        "      |     ^~~~",
+        "<source>:59:5: note: 'int main()' previously defined here",
+        "   59 | int main() {",
+        "      |     ^~~~",
+      ],
+      { offset: 51, lineCount: 11 },
+    ),
+    [
+      "<test harness>: error: redefinition of 'int main()'",
+      "<source>:8:5: note: 'int main()' previously defined here",
+      "    8 | int main() {",
+      "      |     ^~~~",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:15: error: duplicate class: Main",
+        "class Main {",
+        "^",
+        "1 error",
+      ],
+      { offset: 4, lineCount: 10 },
+    ),
+    "<test harness>: error: duplicate class: Main\n1 error",
+  );
+});
+
+test("a harness note under the candidate's own error adds no signature note", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>:53:8: error: redefinition of 'struct ListNode'",
+        "   53 | struct ListNode {",
+        "      |        ^~~~~~~~",
+        "<source>:20:8: note: previous definition of 'struct ListNode'",
+        "   20 | struct ListNode {",
+        "      |        ^~~~~~~~",
+      ],
+      { offset: 51, lineCount: 6 },
+    ),
+    [
+      "<source>:2:8: error: redefinition of 'struct ListNode'",
+      "    2 | struct ListNode {",
+      "      |        ^~~~~~~~",
+      "<test harness>: note: previous definition of 'struct ListNode'",
+    ].join("\n"),
+  );
+});
+
+// What clang, g++ and javac returned when the closing brace of settlesToOne
+// was left out of a 4-line C, 7-line C++ and 6-line Java answer. The g++ one
+// is cut after its second error.
+test("an unclosed brace points at the candidate's last line, with no note", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>:42:16: error: function definition is not allowed here",
+        "   42 | int main(void) {",
+        "      |                ^",
+        "<source>:106:2: error: expected '}'",
+        "  106 | }",
+        "      |  ^",
+        "<source>:38:26: note: to match this '{'",
+        "   38 | bool settlesToOne(int n) {",
+        "      |                          ^",
+        "2 errors generated.",
+      ],
+      { offset: 37, lineCount: 4 },
+    ),
+    [
+      "<test harness>: error: function definition is not allowed here",
+      "<source>:4: error: expected '}'",
+      "<source>:1:26: note: to match this '{'",
+      "    1 | bool settlesToOne(int n) {",
+      "      |                          ^",
+      "2 errors generated.",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:112:2: error: expected '}' at end of input",
+        "  112 | }",
+        "      |  ^",
+        "<source>:52:16: note: to match this '{'",
+        "   52 | class Solution {",
+        "      |                ^",
+        "<source>: In member function 'int Solution::main()':",
+        "<source>:112:1: warning: no return statement in function returning non-void [-Wreturn-type]",
+        "  112 | }",
+        "      | ^",
+        "<source>: At global scope:",
+        "<source>:112:2: error: expected unqualified-id at end of input",
+        "  112 | }",
+        "      |  ^",
+      ],
+      { offset: 51, lineCount: 7 },
+    ),
+    [
+      "<source>:7: error: expected '}' at end of input",
+      "<source>:1:16: note: to match this '{'",
+      "    1 | class Solution {",
+      "      |                ^",
+      "<test harness>: In member function 'int Solution::main()':",
+      "<test harness>: warning: no return statement in function returning non-void [-Wreturn-type]",
+      "<source>: At global scope:",
+      "<source>:7: error: expected unqualified-id at end of input",
+    ].join("\n"),
+  );
+  assert.equal(
+    compileError(
+      [
+        "<source>:93: error: reached end of file while parsing",
+        "}",
+        " ^",
+        "1 error",
+      ],
+      { offset: 4, lineCount: 6 },
+    ),
+    "<source>:6: error: reached end of file while parsing\n1 error",
+  );
+});
+
+// g++ on a 7-line C++ answer whose method is itself called main, cut after
+// the first harness error: only the scope line above a harness location is
+// relabelled.
+test("a scope line names the harness only when its location is there", () => {
+  assert.equal(
+    compileError(
+      [
+        "<source>: In member function 'bool Solution::main(int)':",
+        "<source>:56:16: error: 'missing' was not declared in this scope",
+        "   56 |         return missing;",
+        "      |                ^~~~~~~",
+        "<source>: In function 'int main()':",
+        "<source>:66:28: error: 'class Solution' has no member named 'settlesToOne'",
+        "   66 |     auto actual = solution.settlesToOne(n);",
+        "      |                            ^~~~~~~~~~~~",
+      ],
+      { offset: 51, lineCount: 8 },
+    ),
+    [
+      "<source>: In member function 'bool Solution::main(int)':",
+      "<source>:5:16: error: 'missing' was not declared in this scope",
+      "    5 |         return missing;",
+      "      |                ^~~~~~~",
+      "<test harness>: In function 'int main()':",
+      "<test harness>: error: 'class Solution' has no member named 'settlesToOne'",
+      HARNESS_SIGNATURE_NOTE,
+    ].join("\n"),
+  );
+});
+
+test("only lines past either end of the candidate's code are the harness", () => {
+  const editor = { offset: 10, lineCount: 3 };
+  assert.equal(
+    compileError(["<source>:11: error: x"], editor),
+    "<source>:1: error: x",
+  );
+  assert.equal(
+    compileError(["<source>:13: error: x"], editor),
+    "<source>:3: error: x",
+  );
+  for (const line of [10, 14]) {
+    assert.equal(
+      compileError([`<source>:${line}: error: x`], editor),
+      `<test harness>: error: x\n${HARNESS_SIGNATURE_NOTE}`,
+    );
+  }
 });
 
 function bankFunctionTypes() {

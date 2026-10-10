@@ -164,6 +164,18 @@ export function generateHarness(language, spec, candidateCode) {
     : javaHarness(spec, candidateCode);
 }
 
+const CANDIDATE_MARKER = "CODETRIAL_CANDIDATE_CODE";
+
+/// How many harness lines come before the candidate's first line. Measured on
+/// a harness built around a marker rather than counted by hand, so a line added
+/// to a prelude moves the remap with it.
+export function harnessLineOffset(language, spec) {
+  const source = generateHarness(language, spec, CANDIDATE_MARKER);
+  return (
+    source.slice(0, source.indexOf(CANDIDATE_MARKER)).split("\n").length - 1
+  );
+}
+
 export function parseCompilerResults(stdout) {
   const text = compilerText(stdout);
   for (
@@ -182,7 +194,9 @@ export function parseCompilerResults(stdout) {
   return { setupError: "The run produced no JSON results." };
 }
 
-export function mapCompilerResponse(response) {
+/// `editor` is `{ offset, lineCount }` for remapping compile errors to the
+/// candidate's lines; without it the compiler's text passes through as is.
+export function mapCompilerResponse(response, editor = null) {
   if (!response)
     return { setupError: "Compiler Explorer did not return a response." };
   if (response.timedOut)
@@ -191,9 +205,8 @@ export function mapCompilerResponse(response) {
       diagnostic: DIAGNOSTIC.timeout,
     };
   if (response.didExecute === false) {
-    const diagnostics = compilerText(
-      response.buildResult?.stderr || response.stderr,
-    );
+    const text = compilerText(response.buildResult?.stderr || response.stderr);
+    const diagnostics = editor ? remapDiagnostics(text, editor) : text;
     return {
       setupError:
         diagnostics || "Compilation failed before the tests could run.",
@@ -209,6 +222,127 @@ export function mapCompilerResponse(response) {
     };
   }
   return parseCompilerResults(response.stdout);
+}
+
+// clang, g++ and javac on Compiler Explorer all name the file `<source>`;
+// javac leaves the column out. g++ 16 indents the location of each candidate
+// it lists under a failed call, with its own excerpt below it. Any other file
+// is a library header, reached through a template or a macro, whose lines are
+// already its own.
+const LOCATION = /^(\s*)([^\s:|]+):(\d+):(?:\d+:)?/;
+// The include chain printed above an error in a header names the harness line
+// that pulled the header in.
+const INCLUDED_FROM = /^(In file included from |\s+from )<source>:(\d+)/;
+// The `  56 |     }` excerpt clang and g++ print under a location, and the
+// `     |     ^` caret line, which has no number.
+const EXCERPT_GUTTER = /^(\s*)(\d*)\s*\|/;
+// javac's excerpt is the bare source line followed by a line holding a caret.
+const JAVAC_CARET = /^\s*\^\s*$/;
+// g++ names the function or scope the next location sits in, with no line.
+const SCOPE = /^<source>: (?:In |At )/;
+// An unclosed `{` in the candidate's code swallows the rest of the harness, and
+// each compiler reports it at the harness's last line: g++, javac and clang in
+// that order. The errors around it come from the same brace, not a signature.
+const END_OF_INPUT =
+  /at end of input$|reached end of file while parsing$|error: expected '}'$/;
+// The harness compiles on its own, so a name it defines twice is one the
+// candidate also defined, such as their own `main` or `class Main`.
+const CLASH = / error: (?:redefinition of |duplicate class: )/;
+
+export const HARNESS_SIGNATURE_NOTE =
+  "The tests call the original function signature; check that it is unchanged.";
+
+/// A position outside the candidate's code has no editor line to give, so it
+/// is named as the harness and its excerpt, code they never wrote, is
+/// dropped. A renamed or retyped function is the usual way there, and the note
+/// says so once, for the candidate and for Jim, who reads it via setupError.
+function remapDiagnostics(text, { offset, lineCount }) {
+  const lines = [];
+  const outside = (editorLine) => editorLine < 1 || editorLine > lineCount;
+  let inHarness = false;
+  let inHeader = false;
+  // An excerpt can run past the code its location names: clang's "declared
+  // here" under a renamed C function prints every line from that function down
+  // to the harness call. Each numbered line is judged on its own, and the
+  // unnumbered marker lines under it go with it.
+  let hidingExcerpt = false;
+  let harnessError = false;
+  let unclosed = false;
+  let scope = null;
+  for (const line of text.split("\n")) {
+    if (SCOPE.test(line)) {
+      lines.push(line);
+      scope = lines.length - 1;
+      continue;
+    }
+    const included = line.match(INCLUDED_FROM);
+    if (included) {
+      const [prefix, lead, number] = included;
+      const editorLine = Number(number) - offset;
+      const rest = line.slice(prefix.length);
+      lines.push(
+        outside(editorLine)
+          ? `${lead}<test harness>${rest}`
+          : `${lead}<source>:${editorLine}${rest}`,
+      );
+      continue;
+    }
+    const location = line.match(LOCATION);
+    if (location) {
+      const [prefix, indent, file, number] = location;
+      const editorLine = Number(number) - offset;
+      inHeader = file !== "<source>";
+      inHarness = !inHeader && outside(editorLine);
+      hidingExcerpt = inHarness;
+      const endOfInput = inHarness && END_OF_INPUT.test(line);
+      unclosed ||= endOfInput;
+      // Only an error earns the note. A harness `note:` is the prelude's side
+      // of an error in the candidate's code, such as the first definition of
+      // a ListNode they redefined, which no signature check would fix.
+      harnessError ||=
+        inHarness && line.includes(" error: ") && !CLASH.test(line);
+      if (scope !== null && inHarness && !endOfInput)
+        lines[scope] =
+          `<test harness>:${lines[scope].slice("<source>:".length)}`;
+      scope = null;
+      if (inHeader) lines.push(line);
+      else if (endOfInput)
+        lines.push(
+          `${indent}<source>:${lineCount}:${line.slice(prefix.length)}`,
+        );
+      else if (inHarness)
+        lines.push(`${indent}<test harness>:${line.slice(prefix.length)}`);
+      else
+        lines.push(
+          `${indent}<source>:${editorLine}${line.slice(`${indent}<source>:${number}`.length)}`,
+        );
+      continue;
+    }
+    const gutter = line.match(EXCERPT_GUTTER);
+    if (gutter && inHeader) {
+      lines.push(line);
+      continue;
+    }
+    if (gutter) {
+      const width = gutter[1].length + gutter[2].length;
+      const editorLine = Number(gutter[2]) - offset;
+      if (gutter[2]) hidingExcerpt = inHarness || outside(editorLine);
+      if (hidingExcerpt) continue;
+      lines.push(
+        gutter[2]
+          ? String(editorLine).padStart(width) + line.slice(width)
+          : line,
+      );
+      continue;
+    }
+    if (inHarness && JAVAC_CARET.test(line)) {
+      lines.pop();
+      continue;
+    }
+    lines.push(line);
+  }
+  if (harnessError && !unclosed) lines.push(HARNESS_SIGNATURE_NOTE);
+  return lines.join("\n");
 }
 
 function cHarness(spec, candidateCode) {
@@ -542,8 +676,8 @@ function cppPrefixGuard(spec, lengthName) {
 /// the test runnable wherever a JDK exists.
 function javaHarness(spec, candidateCode) {
   candidateCode = candidateCode.replace(
-    /\bpublic\s+class\s+Solution\b/g,
-    "class Solution",
+    /\bpublic(?=\s+class\s+Solution\b)/g,
+    "",
   );
   return `import java.util.*;
 class ListNode { int val; ListNode next; ListNode() { this(0, null); } ListNode(int val) { this(val, null); } ListNode(int val, ListNode next) { this.val = val; this.next = next; } }
@@ -588,8 +722,8 @@ ${spec.cases.map((testCase) => javaCase(spec, testCase)).join("\n")}
 
 function javaClassHarness(spec, candidateCode) {
   candidateCode = candidateCode.replace(
-    new RegExp(`\\bpublic\\s+class\\s+${spec.className}\\b`, "g"),
-    `class ${spec.className}`,
+    new RegExp(`\\bpublic(?=\\s+class\\s+${spec.className}\\b)`, "g"),
+    "",
   );
   return `import java.util.*;
 class ListNode { int val; ListNode next; ListNode() { this(0, null); } ListNode(int val) { this(val, null); } ListNode(int val, ListNode next) { this.val = val; this.next = next; } }
