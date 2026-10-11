@@ -22,7 +22,7 @@ if [ "${1:-}" = "--rules" ]; then
 4. Use the imperative mood: "Fix", not "Fixed" or "Fixes"
 5. No conventional-commit prefix: not "fix:", not "feat(web):"
 6. Wrap the body at 72 characters
-7. Say what and why; the diff already says how
+7. Write a body saying what and why; the diff says how
 
 Printable ASCII throughout. One paragraph carries most changes here; the
 per-decision detail belongs in the comment next to the code.
@@ -133,6 +133,13 @@ esac
 # body that started without a blank line between it and the subject.
 if [ -n "$second" ]; then
     error "separate the subject from the body with a blank line"
+fi
+
+# A subject names the change and cannot also carry the reason for it, which is
+# what a reviewer and a later bisect need. Through stripspace, so a body of
+# blank or whitespace-only lines kept under verbatim cleanup is still empty.
+if [ -z "$(printf '%s\n' "$body" | git stripspace)" ]; then
+    error "a body is required: say what changed and why"
 fi
 
 # The message is ASCII by the rule above, so a byte is a column and grep can
