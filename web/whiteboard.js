@@ -42,7 +42,16 @@ export const MAX_POINTS = 1200;
 
 /// The pens the toolbar offers. Black first: it is what a real board is
 /// written in, and the rest are for marking up what is already there.
-export const PEN_COLORS = ["#101418", "#c2261b", "#1b64c2", "#1f8a4c"];
+///
+/// Each carries the name its swatch is announced by. The swatch is a dot of
+/// color with no text, so without one a screen reader reads out the hex value
+/// and Voice Control asks the candidate to say it.
+export const PEN_COLORS = [
+  { color: "#101418", name: "Black" },
+  { color: "#c2261b", name: "Red" },
+  { color: "#1b64c2", name: "Blue" },
+  { color: "#1f8a4c", name: "Green" },
+];
 
 export const PEN_WIDTH = 3;
 /// The eraser sizes the toolbar offers, in board pixels.

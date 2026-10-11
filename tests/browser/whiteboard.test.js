@@ -23,7 +23,7 @@ import {
   drawBoard,
 } from "../../web/whiteboard.js";
 
-const BLACK = PEN_COLORS[0];
+const BLACK = PEN_COLORS[0].color;
 
 /// Draws one stroke from (x1,y1) to (x2,y2), the way a press-drag-release does.
 function stroke(board, x1, y1, x2, y2, tool = "pen") {
