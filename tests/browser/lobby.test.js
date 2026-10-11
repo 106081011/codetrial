@@ -1516,7 +1516,10 @@ lobbyTest(
     const title = await page
       .locator(`[data-problem="${first.card}"] .problem-title`)
       .textContent();
-    assert.equal(first.note, `Selected problem: ${title}.`);
+    assert.equal(
+      first.note,
+      `Selected problem: ${title} (${(await cardInfo(page, first.card)).level}).`,
+    );
     assert.equal(first.card, eligible[1]);
     assert.deepEqual(first.levels, ["Medium", "Hard"]);
     assert.equal(first.duration, "60");
@@ -1700,9 +1703,12 @@ for (const first of [0, 1]) {
       await page.click(`[data-problem="${MEDIUM[1]}"]`);
       assert.equal((await snapshot(page)).card, MEDIUM[1]);
       await page.click("#random-problem");
-      assert.equal((await snapshot(page)).card, MEDIUM[0]);
+      const drawn = await snapshot(page);
+      assert.notEqual(drawn.card, MEDIUM[1]);
+      assert.equal((await cardInfo(page, drawn.card)).level, "Medium");
+      assert.doesNotMatch(drawn.note, /Review due/);
       await page.click("#random-problem");
-      assert.notEqual((await snapshot(page)).card, MEDIUM[0]);
+      assert.notEqual((await snapshot(page)).card, drawn.card);
     },
   );
 }
@@ -4586,5 +4592,59 @@ lobbyTest(
         window.releaseAccount?.();
       });
     }
+  },
+);
+
+lobbyTest(
+  "a difficulty change from a fresh lobby retains review priority",
+  async (page) => {
+    reports = [savedAttempt(EASY[0]), savedAttempt(EASY[1])];
+    const initial = await lobby(page);
+    assert.deepEqual(initial.levels, ["Medium"]);
+    assert.equal((await cardInfo(page, initial.card)).level, "Easy");
+    assert.match(initial.note, /Review due/);
+    await page.evaluate(() => {
+      Math.random = () => 0;
+    });
+    await setLevel(page, "Hard", true);
+    await setLevel(page, "Medium", false);
+    const changed = await snapshot(page);
+    assert.deepEqual(changed.levels, ["Hard"]);
+    assert.ok(EASY.includes(changed.card));
+    assert.match(changed.note, /Review due/);
+    assert.equal((await cardInfo(page, changed.card)).hidden, false);
+  },
+);
+
+lobbyTest(
+  "a topic change after a random draw restores review priority",
+  async (page) => {
+    const due = pageOf("valid-parentheses");
+    reports = [savedAttempt(due)];
+    await lobby(page);
+    await page.click("#random-problem");
+    assert.doesNotMatch((await snapshot(page)).note, /Review due/);
+    await openTopicFilter(page);
+    await page.selectOption("#problem-topic", "Array");
+    const changed = await snapshot(page);
+    assert.equal(changed.card, due);
+    assert.match(changed.note, /Review due/);
+    assert.equal((await cardInfo(page, due)).hidden, false);
+  },
+);
+
+lobbyTest(
+  "an explicit random draw escapes overdue reviews at the selected level",
+  async (page) => {
+    reports = [savedAttempt(EASY[0]), savedAttempt(EASY[1])];
+    const initial = await lobby(page);
+    assert.match(initial.note, /Review due/);
+    await page.evaluate(() => {
+      Math.random = () => 0;
+    });
+    await page.click("#random-problem");
+    const drawn = await snapshot(page);
+    assert.equal((await cardInfo(page, drawn.card)).level, "Medium");
+    assert.doesNotMatch(drawn.note, /Review due/);
   },
 );
