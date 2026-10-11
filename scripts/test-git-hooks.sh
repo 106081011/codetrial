@@ -139,6 +139,13 @@ expect 1 "a subject past 50 characters" \
     message "Add the scratch repository the hook tests run inside of"
 expect 1 "a body with no blank line above it" message "Add the repository
 Body on the second line."
+expect 1 "a subject with no body" message "Add the scratch repository"
+expect 1 "a body of whitespace only" message "Add the scratch repository
+
+   "
+expect 1 "a body of comments only" message "Add the scratch repository
+
+# Please enter the commit message for your changes."
 expect 1 "a body line past 72 characters" message "Add the repository
 
 This line exists to run past the seventy-two column limit that the hook is
@@ -276,7 +283,8 @@ printf '#!/bin/sh\nexit 1\n' > scripts/git-pre-commit.sh
 (cd "$work/linked" \
     && printf '#!/bin/sh\n\necho staged\n' > linked.sh \
     && git add linked.sh \
-    && git commit -q -m "Add the linked worktree") \
+    && git commit -q -m "Add the linked worktree" \
+        -m "The hook must resolve to this worktree's scripts.") \
     || fail "a linked worktree runs its own hook"
 
 if [ "$failures" -eq 0 ]; then
