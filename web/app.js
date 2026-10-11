@@ -254,7 +254,7 @@ nodes.randomProblem.addEventListener("click", () => {
   roll = Math.random();
   avoidedProblem = problem?.id;
   applyDifficulties();
-  recommend();
+  recommend("", "random");
 });
 
 for (const input of levels) {
@@ -1029,7 +1029,7 @@ function filterSelectionChanged() {
 
 /// `note` is the sentence explaining a level the reports chose, empty when the
 /// candidate chose it themselves and so already knows.
-function recommend(note = "") {
+function recommend(note = "", mode = "recommend") {
   // A candidate who picked a card has answered the question this line asks, so
   // it stays answered. Naming a different problem here contradicted the card
   // they had just selected. A kept draw stands the same way until `settle`
@@ -1043,6 +1043,7 @@ function recommend(note = "") {
     undefined,
     avoidedProblem,
     cards,
+    mode,
   );
   // Nothing to offer is still an answer, and it has to go through `setProblem`
   // like every other one. Returning here left whatever was picked for the
@@ -1054,6 +1055,11 @@ function recommend(note = "") {
     return;
   }
   setProblem(choice.picked);
+  // A random draw names the level rather than a review interval or streak.
+  if (mode === "random") {
+    nodes.recommendation.textContent = `${note}Selected problem: ${title(choice.picked)} (${choice.picked.difficulty}).`;
+    return;
+  }
   if (choice.review) {
     // A review can fall outside the levels now selected, so the card is
     // unhidden and the level said out loud rather than silently ignored.
