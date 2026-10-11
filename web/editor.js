@@ -1,4 +1,4 @@
-import { tokenize } from "./tokenizer.js";
+import { lineCommentFor, tokenize } from "./tokenizer.js";
 
 const INDENT = "    ";
 
@@ -224,5 +224,77 @@ export function indentSelection(value, start, end, outdent = false) {
   // A caret is one position, so it maps once: `includeAtPosition` has to be the
   // same on both ends or a column-0 caret is left behind the indent it just
   // inserted. A real selection keeps the exclusive end it started with.
+  return { value, start: map(start, true), end: map(end, start === end) };
+}
+
+// Matched on the character and not the key's position: the key that sits
+// where a US slash does types `-` on a German layout, and Ctrl with that one
+// is the browser's zoom. Shift is left unread for the same layouts, where the
+// slash itself is a shifted key. Alt is refused because AltGr reports as
+// Ctrl+Alt on Windows and types a character of its own.
+export function isToggleCommentKeystroke(event) {
+  return (
+    event.key === "/" &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.altKey &&
+    !event.isComposing
+  );
+}
+
+// Comments the lines the selection touches, or uncomments them when every one
+// that has text already is a comment, so a second press undoes the first and
+// a block with one commented line in it gains a level rather than losing that
+// line's. Null for a language with no line comment, so the caller leaves the
+// keystroke alone.
+export function toggleLineComment(value, start, end, language) {
+  const marker = lineCommentFor(language);
+  if (!marker) return null;
+  // The same two bounds as indentSelection, for the reasons given there.
+  const lineStart = start === 0 ? 0 : value.lastIndexOf("\n", start - 1) + 1;
+  const lines = [];
+  for (let at = lineStart; at < end || at === lineStart;) {
+    const next = value.indexOf("\n", at);
+    const text = value.slice(at, next === -1 ? value.length : next);
+    const indent = text.match(/^[ \t]*/)[0].length;
+    lines.push({ at, indent, blank: indent === text.length });
+    if (next === -1) break;
+    at = next + 1;
+  }
+  // Blank lines sit a comment out, or commenting a block would leave a marker
+  // and a trailing space on each. When nothing else is selected they are what
+  // the candidate asked to comment.
+  const written = lines.filter((line) => !line.blank);
+  const targets = written.length ? written : lines;
+  const commented = targets.every((line) =>
+    value.startsWith(marker, line.at + line.indent),
+  );
+  // One column for the whole block, the shallowest line's, so the markers
+  // line up and the code keeps its indentation relative to them.
+  const column = Math.min(...targets.map((line) => line.indent));
+  const changes = targets.map((line) => {
+    if (!commented)
+      return { at: line.at + column, remove: 0, insert: `${marker} ` };
+    const at = line.at + line.indent;
+    // The space is taken back only where there is one: a comment the
+    // candidate typed as `#x` is still a comment to remove.
+    const spaced = value[at + marker.length] === " ";
+    return { at, remove: marker.length + Number(spaced), insert: "" };
+  });
+  // Changes are in document order, so the first one past the position ends
+  // the walk. A position inside a removed marker collapses onto its start.
+  const map = (position, includeAtPosition) => {
+    let mapped = position;
+    for (const { at, remove, insert } of changes) {
+      if (at > position || (at === position && !includeAtPosition)) break;
+      mapped += insert.length - Math.min(remove, position - at);
+    }
+    return mapped;
+  };
+  for (let index = changes.length - 1; index >= 0; index -= 1) {
+    const { at, remove, insert } = changes[index];
+    value = `${value.slice(0, at)}${insert}${value.slice(at + remove)}`;
+  }
+  // A caret maps once, as in indentSelection; a selection that ends where a
+  // marker goes in still ends before it.
   return { value, start: map(start, true), end: map(end, start === end) };
 }

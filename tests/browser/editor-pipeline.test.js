@@ -603,14 +603,21 @@ test("disabled highlighting and indentation invoke neither classifier nor parser
   const ctx = await editorPage(t, {
     params: { editorHighlight: "0", editorAutoIndent: "0" },
     beforeLoad: async (page) => {
-      for (const [module, name] of [
-        ["highlight", "highlight"],
-        ["tokenizer", "tokenize"],
+      // Every name editor.js imports, or the page fails to link before any
+      // of them could be called and the test reports that instead.
+      for (const [module, names] of [
+        ["highlight", ["highlight"]],
+        ["tokenizer", ["tokenize", "lineCommentFor"]],
       ])
         await page.route(`**/${module}.js`, (route) =>
           route.fulfill({
             contentType: "text/javascript",
-            body: `export function ${name}() { throw new Error("Disabled classifier called"); }`,
+            body: names
+              .map(
+                (name) =>
+                  `export function ${name}() { throw new Error("Disabled classifier called"); }`,
+              )
+              .join("\n"),
           }),
         );
     },
