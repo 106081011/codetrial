@@ -132,6 +132,9 @@ pub(super) const LATE_TRANSCRIPT_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) struct RuntimeActivity {
     pub(super) last_code_change: Instant,
+    /// The substantive revision and language last delivered silently or in a
+    /// briefing; the code itself is `RuntimeState::code_shown`.
+    pub(super) silent_editor_delivery: Option<(u64, String)>,
     pub(super) last_user_speech: Instant,
     /// When the candidate stopped talking and started waiting, if they have and
     /// the reply has not begun. Separate from `last_user_speech`, which the
@@ -180,6 +183,8 @@ pub(super) struct RuntimeActivity {
     pub(super) prompt_sequence: u64,
     pub(super) last_agent_speech: Instant,
     pub(super) last_nudge: Instant,
+    completed_coding_nudges: u8,
+    last_successful_completed_nudge: Option<Instant>,
     pub(super) last_review: Instant,
     pub(super) last_interjection: Instant,
     pub(super) last_test_reaction: Instant,
@@ -273,7 +278,23 @@ pub(super) struct RuntimeActivity {
     /// drop is judged at completion.
     pub(super) latest_prompt_tokens: Option<u64>,
     pub(super) peak_prompt_tokens: u64,
+    /// The last completed single-generation count, without observations from
+    /// a turn later found to have used tools.
+    comparable_prompt_tokens: u64,
+    /// A tool turn's largest observed total bounds each invocation's context.
+    /// It can prove a decrease but must never seed the comparable peak.
+    tool_prompt_tokens: u64,
+    /// The last tool turn's total, kept only to judge whether a cut is
+    /// plausible: the context grows through tool turns too, and the frozen
+    /// comparable count alone would read it as still near the target. Cleared
+    /// by the next comparable count.
+    tool_prompt_bound: u64,
     pub(super) context_refresh_pending: bool,
+    /// A tool-assisted usage sample can sum several model invocations. Its
+    /// prompt total is spend, not a context-size reading comparable with a
+    /// single-generation turn. Only a total below a prior comparable count
+    /// can prove a cut; it never becomes the next comparison's baseline.
+    tool_usage_this_turn: bool,
     /// When the candidate's microphone last carried more than room noise. The
     /// transcript is no guide here: it arrives after the speech it transcribes,
     /// and a checkpoint sent in that gap lands in the middle of an utterance.
@@ -282,6 +303,11 @@ pub(super) struct RuntimeActivity {
     /// has, it may not be hearing them at all, as a socket on its way to a
     /// 1011 does not, so their voice on the track stamps `last_user_speech`.
     pub(super) transcribed_on_socket: bool,
+    pub(super) candidate_voice_active: bool,
+    candidate_voice_ended_at: Option<Instant>,
+    voiced_pcm_at: Option<Instant>,
+    rebased_voiced_pcm_at: Option<Instant>,
+    incoming_speech_owed: bool,
 }
 
 /// How long the microphone has to stay quiet before a checkpoint may go out:
@@ -289,12 +315,19 @@ pub(super) struct RuntimeActivity {
 /// sentences is not taken for the end of the turn.
 pub(super) const CHECKPOINT_VOICE_QUIET: Duration = Duration::from_secs(2);
 
+/// How long a provider speech-start may stand with no fresh evidence, from the
+/// microphone or the provider, before its missing end is assumed. Voiced
+/// frames renew it, so it never ends real speech; it bounds how long one lost
+/// `ACTIVITY_END` can hold back checkpoints, phase judgments and nudges.
+pub(super) const STALE_VOICE_ACTIVITY: Duration = Duration::from_secs(10);
+
 /// A prompt the watcher wants spoken, and whether delivering it spends the
 /// behavioral round's one silence nudge. Carried with the text so the sender
 /// records the prompt it sent rather than inferring it from the round.
 pub(super) struct WatchPrompt {
     pub(super) text: String,
     pub(super) behavioral_nudge: bool,
+    pub(super) completed_coding_nudge: bool,
     /// An editor review, which may rightly get no answer at all.
     pub(super) allows_silence: bool,
 }
@@ -373,6 +406,7 @@ impl RuntimeActivity {
         self.context_refresh_pending
             && !paused
             && !candidate_open
+            && !self.candidate_voice_active
             && self
                 .candidate_voice_at
                 .is_none_or(|at| now.saturating_duration_since(at) >= CHECKPOINT_VOICE_QUIET)
@@ -403,19 +437,26 @@ impl RuntimeActivity {
             cause.unwrap_or("candidate"),
             usage.log_fields()
         );
+        if cause == Some("tool") {
+            self.mark_tool_usage();
+        }
         self.observe_prompt_tokens(compression, usage.prompt);
         self.live_usage.add(usage);
         line
     }
 
-    /// Every observation, periodic or not; a zero says nothing about the
-    /// context and is ignored.
+    /// Comparable observations, periodic or not; a zero says nothing about
+    /// context. Tool-turn totals remain spend counters and upper bounds only.
     pub(super) fn observe_prompt_tokens(
         &mut self,
         compression: Option<crate::config::GeminiContextCompression>,
         prompt: u64,
     ) {
         if compression.is_none() || prompt == 0 {
+            return;
+        }
+        if self.tool_usage_this_turn {
+            self.tool_prompt_tokens = self.tool_prompt_tokens.max(prompt);
             return;
         }
         self.latest_prompt_tokens = Some(prompt);
@@ -428,16 +469,31 @@ impl RuntimeActivity {
     /// own still counts. A drop of the threshold is a cut, and so is any drop
     /// from a context that had reached the trigger: new input in the same turn
     /// can make up most of what was cut, but a context only shrinks when the
-    /// provider cuts it. A heuristic, not an API compression event.
+    /// provider cuts it. For a tool turn, only a total below the previous
+    /// completed single-generation count can prove that decrease. A heuristic,
+    /// not an API compression event.
     pub(super) fn observe_turn_complete(
         &mut self,
         compression: Option<crate::config::GeminiContextCompression>,
     ) {
+        let tool_turn = std::mem::take(&mut self.tool_usage_this_turn);
+        let tool_prompt = std::mem::take(&mut self.tool_prompt_tokens);
+        if tool_turn {
+            self.latest_prompt_tokens = None;
+        }
         let Some(compression) = compression else {
             return;
         };
-        let Some(latest) = self.latest_prompt_tokens.take() else {
-            return;
+        let (reference, latest) = if tool_turn {
+            if tool_prompt == 0 {
+                return;
+            }
+            (self.comparable_prompt_tokens, tool_prompt)
+        } else {
+            let Some(latest) = self.latest_prompt_tokens.take() else {
+                return;
+            };
+            (self.peak_prompt_tokens, latest)
         };
         let threshold = u64::from(
             compression
@@ -446,13 +502,64 @@ impl RuntimeActivity {
         )
         .saturating_div(2)
         .clamp(1, 2048);
-        let reference = self.peak_prompt_tokens;
         let cut_at_trigger =
             reference >= u64::from(compression.trigger_tokens) && latest < reference;
         if reference.saturating_sub(latest) >= threshold || cut_at_trigger {
             self.context_refresh_pending = true;
+            if tool_turn {
+                // The aggregate proved a drop but supplies no new comparable
+                // baseline. Using it would count the following ordinary
+                // response's smaller single invocation as another cut.
+                self.comparable_prompt_tokens = 0;
+                self.peak_prompt_tokens = 0;
+            }
         }
-        self.peak_prompt_tokens = latest;
+        if tool_turn {
+            self.tool_prompt_bound = latest;
+        } else {
+            self.comparable_prompt_tokens = latest;
+            self.peak_prompt_tokens = latest;
+            self.tool_prompt_bound = 0;
+        }
+    }
+
+    /// Whether the context could reach the trigger on the next input: nothing
+    /// measured yet, a cut already detected, or the last comparable count in
+    /// the upper half of the band a cut drops it through. Just after a cut the
+    /// context sits near the target, so the continuity a cut needs is not
+    /// carried again until it has grown back toward the trigger. A tool turn's
+    /// total counts as an upper bound here, so growth through tool turns is not
+    /// missed; erring high costs continuity text, erring low costs the cut.
+    pub(super) fn context_cut_plausible(
+        &self,
+        compression: Option<crate::config::GeminiContextCompression>,
+    ) -> bool {
+        let Some(compression) = compression else {
+            return false;
+        };
+        let measured = self.peak_prompt_tokens;
+        let bound = measured.max(self.tool_prompt_bound);
+        let trigger = u64::from(compression.trigger_tokens);
+        let band = trigger.saturating_sub(u64::from(compression.target_tokens));
+        self.context_refresh_pending || measured == 0 || bound >= trigger - band / 2
+    }
+
+    /// Mirrors [`Self::context_cut_plausible`] onto the state the send paths
+    /// read, at each place its inputs change.
+    pub(super) fn sync_cut_plausible(&self, state: &mut RuntimeState) {
+        state.context_cut_plausible = self.context_cut_plausible(state.context_compression);
+    }
+
+    fn mark_tool_usage(&mut self) {
+        if !self.tool_usage_this_turn {
+            self.tool_prompt_tokens = self.latest_prompt_tokens.take().unwrap_or(0);
+
+            // Usage can precede the tool-call frame. Retract that provisional
+            // peak when the turn proves to contain multiple invocations.
+            self.peak_prompt_tokens = self.comparable_prompt_tokens;
+        }
+        self.tool_usage_this_turn = true;
+        self.latest_prompt_tokens = None;
     }
 
     /// A replacement's briefing already carries the local state a checkpoint
@@ -460,12 +567,91 @@ impl RuntimeActivity {
     /// provider's context and so its baseline, or a cut in its first turn
     /// would have nothing to be measured against; a cold one starts over.
     pub(super) fn reset_context_observations(&mut self, resumed: bool) {
+        self.tool_usage_this_turn = false;
+        self.tool_prompt_tokens = 0;
         if !resumed {
             self.peak_prompt_tokens = 0;
+            self.comparable_prompt_tokens = 0;
+            self.tool_prompt_bound = 0;
         }
         self.latest_prompt_tokens = None;
         self.context_refresh_pending = false;
         self.transcribed_on_socket = false;
+        self.clear_candidate_voice_activity();
+    }
+
+    pub(super) fn note_candidate_voice_activity(&mut self, active: bool, now: Instant) {
+        if active || self.candidate_voice_active {
+            self.reset_completed_coding_idle();
+        }
+        self.candidate_voice_active = active;
+        self.candidate_voice_ended_at = (!active).then_some(now);
+        self.last_user_speech = now;
+        self.candidate_voice_at = Some(now);
+        if active && self.recent_voiced_pcm(now) && self.voiced_pcm_at != self.rebased_voiced_pcm_at
+        {
+            self.incoming_speech_owed |= self.reply_unfinished();
+        } else if !active && std::mem::take(&mut self.incoming_speech_owed) {
+            self.rebased_voiced_pcm_at = self.voiced_pcm_at;
+            self.resume_reply_wait(now);
+        }
+    }
+
+    /// Ends a speech-start whose end never came, as if it had come when the
+    /// evidence went stale, so the transcription grace still applies.
+    pub(super) fn expire_stale_voice_activity(&mut self, now: Instant) {
+        if self.candidate_voice_active
+            && self
+                .candidate_voice_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= STALE_VOICE_ACTIVITY)
+        {
+            self.candidate_voice_active = false;
+            self.candidate_voice_ended_at = Some(now);
+        }
+    }
+
+    pub(super) fn clear_candidate_voice_activity(&mut self) {
+        self.candidate_voice_active = false;
+        self.candidate_voice_ended_at = None;
+        self.voiced_pcm_at = None;
+        self.rebased_voiced_pcm_at = None;
+        self.incoming_speech_owed = false;
+    }
+
+    fn recent_voiced_pcm(&self, now: Instant) -> bool {
+        self.voiced_pcm_at
+            .is_some_and(|at| now.saturating_duration_since(at) < CHECKPOINT_VOICE_QUIET)
+    }
+
+    pub(super) fn incoming_speech_active(&self, now: Instant) -> bool {
+        self.candidate_voice_active && self.recent_voiced_pcm(now)
+    }
+
+    // A stale VAD edge cannot renew the wait without microphone evidence.
+    // Rebase once at the acoustic quiet boundary, not at every watch tick.
+    fn settle_incoming_speech(&mut self, now: Instant) {
+        if self.incoming_speech_owed && !self.incoming_speech_active(now) {
+            self.incoming_speech_owed = false;
+            self.rebased_voiced_pcm_at = self.voiced_pcm_at;
+            if let Some(at) = self.voiced_pcm_at {
+                self.resume_reply_wait(at + CHECKPOINT_VOICE_QUIET);
+            }
+        }
+    }
+
+    /// The provider reported the end of candidate speech that no later start
+    /// has superseded.
+    pub(super) fn candidate_voice_ended(&self) -> bool {
+        self.candidate_voice_ended_at.is_some()
+    }
+
+    pub(super) fn candidate_transcription_pending(&self, now: Instant) -> bool {
+        self.candidate_voice_ended_at
+            .is_some_and(|at| now.saturating_duration_since(at) < CHECKPOINT_VOICE_QUIET)
+            || (self.candidate_voice_active
+                && self.candidate_voice_at.is_some_and(|at| {
+                    now.saturating_duration_since(at) >= Duration::from_millis(500)
+                }))
     }
 
     /// The candidate's microphone carried more than room noise. Until the
@@ -474,8 +660,11 @@ impl RuntimeActivity {
     /// otherwise be counted silent and nudged. Only until then, because room
     /// noise above `VOICE_RMS` would hold every nudge back for good.
     pub(super) fn note_candidate_voice(&mut self, now: Instant) {
+        self.voiced_pcm_at = Some(now);
+        self.incoming_speech_owed |= self.candidate_voice_active && self.reply_unfinished();
         self.candidate_voice_at = Some(now);
         if !self.transcribed_on_socket {
+            self.reset_completed_coding_idle();
             self.last_user_speech = now;
         }
     }
@@ -497,6 +686,7 @@ impl RuntimeActivity {
     pub(super) fn with_interim_review_cap(now: Instant, max_interim_reviews: usize) -> Self {
         Self {
             last_code_change: now,
+            silent_editor_delivery: None,
             last_user_speech: now,
             awaiting_reply_since: None,
             prompted_at: None,
@@ -509,6 +699,8 @@ impl RuntimeActivity {
             prompt_sequence: 0,
             last_agent_speech: now,
             last_nudge: now,
+            completed_coding_nudges: 0,
+            last_successful_completed_nudge: None,
             last_review: now,
             last_interjection: now,
 
@@ -536,9 +728,18 @@ impl RuntimeActivity {
             live_exit: super::LiveOutcome::Ok,
             latest_prompt_tokens: None,
             peak_prompt_tokens: 0,
+            comparable_prompt_tokens: 0,
+            tool_prompt_tokens: 0,
+            tool_prompt_bound: 0,
             context_refresh_pending: false,
+            tool_usage_this_turn: false,
             candidate_voice_at: None,
             transcribed_on_socket: false,
+            candidate_voice_active: false,
+            candidate_voice_ended_at: None,
+            voiced_pcm_at: None,
+            rebased_voiced_pcm_at: None,
+            incoming_speech_owed: false,
 
             // Seeded at `now` rather than in the past: the first minutes of an
             // interview are the greeting and the problem statement, and there
@@ -604,6 +805,7 @@ impl RuntimeActivity {
             return;
         }
         self.tool_response_outstanding = true;
+        self.mark_tool_usage();
         self.tool_response_at = Some(now);
         if self.generating {
             // Keep progress after settle_stalls converts the tool debt into
@@ -696,6 +898,14 @@ impl RuntimeActivity {
     /// answers. All of them let a held advisory go, which is what keeps the
     /// socket from being dropped by the server from an older checkpoint.
     pub(super) fn settle_stalls(&mut self, now: Instant, audio_playing: bool) -> Stalls {
+        self.expire_stale_voice_activity(now);
+        self.settle_incoming_speech(now);
+        if self.incoming_speech_active(now) {
+            return Stalls {
+                prompt_released: false,
+                spend_restart: false,
+            };
+        }
         let stalled = |at: Option<Instant>| {
             at.is_some_and(|at| now.saturating_duration_since(at) >= PROMPT_STALL)
         };
@@ -736,7 +946,7 @@ impl RuntimeActivity {
     /// Silence is a valid editor-review answer. Queued audio must finish;
     /// generation that stops making progress still needs recovery.
     pub(super) fn reply_timed_out(&self, now: Instant, audio_playing: bool) -> bool {
-        if audio_playing {
+        if audio_playing || self.incoming_speech_active(now) {
             return false;
         }
         if self.generating {
@@ -764,6 +974,7 @@ impl RuntimeActivity {
             self.unstarted_reply_since()
         };
         !audio_playing
+            && !self.incoming_speech_active(now)
             && waited.is_some_and(|at| now.saturating_duration_since(at) >= REPLY_WAIT_SHOWN)
     }
 
@@ -771,7 +982,8 @@ impl RuntimeActivity {
     /// same rule `settle_stalls` holds a prompt to, applied to output that
     /// began and stopped.
     pub(super) fn generation_stalled(&self, now: Instant) -> bool {
-        self.generating
+        !self.incoming_speech_active(now)
+            && self.generating
             && self
                 .last_output_at
                 .is_some_and(|at| now.saturating_duration_since(at) >= PROMPT_STALL)
@@ -861,6 +1073,7 @@ impl RuntimeActivity {
     /// The drop of stale playout ahead of this call already handed the floor
     /// back, so this is the only place that can tell it from a new answer.
     pub(super) fn note_candidate_finished(&mut self, now: Instant, audio_playing: bool) {
+        self.reset_completed_coding_idle();
         self.last_user_speech = now;
         self.transcribed_on_socket = true;
 
@@ -1099,6 +1312,7 @@ impl RuntimeActivity {
     /// been able to rely on it.
     pub(super) fn claim_phase_judge(&mut self, state: &RuntimeState, now: Instant) -> bool {
         if state.paused
+            || self.candidate_voice_active
             || state.end_requested
             || now.saturating_duration_since(self.last_user_speech) < PHASE_JUDGE_IDLE
             || now.saturating_duration_since(self.last_code_change) < PHASE_JUDGE_IDLE
@@ -1181,6 +1395,7 @@ impl RuntimeActivity {
         let planned =
             Duration::from_secs(u64::from(state.coding_minutes + state.behavioral_minutes) * 60);
         !state.paused
+            && !self.candidate_voice_active
             && !state.end_requested
             && now.saturating_duration_since(state.started_at)
                 + crate::gemini::INTERIM_ATTEMPT_TIMEOUT
@@ -1191,6 +1406,88 @@ impl RuntimeActivity {
             && now.duration_since(self.last_user_speech) >= INTERIM_IDLE
             && now.duration_since(self.last_interim) >= INTERIM_COOLDOWN
             && candidate_lines(&state.transcript[unreviewed_from(state)..]) >= INTERIM_MIN_NEW_TURNS
+    }
+
+    /// A delivered tool continuation can carry the same review as the watcher.
+    /// Consume only that revision, leaving a failed write or a later edit
+    /// armed.
+    pub(super) fn settle_tool_editor_review(
+        &mut self,
+        revision: Option<u64>,
+        sent: bool,
+        now: Instant,
+    ) {
+        if sent
+            && let Some(revision) = revision
+            && revision > self.substantive_revision_at_last_review
+        {
+            self.substantive_revision_at_last_review = revision;
+            self.last_review = now;
+            self.last_interjection = now;
+        }
+    }
+
+    pub(super) fn pending_silent_editor(
+        &self,
+        state: &RuntimeState,
+        now: Instant,
+    ) -> Option<String> {
+        if !super::session::editor_review_allowed(state)
+            || !self.incoming_speech_active(now)
+            || now.saturating_duration_since(self.last_code_change) < CODE_SETTLE
+            || state.evidence_ledger.code.substantive_revision == 0
+        {
+            return None;
+        }
+        let revision = state.evidence_ledger.code.substantive_revision;
+
+        // `code_shown` is what the model holds by any route, a review, a read,
+        // an evidence update or this one; the snapshot only stops a revision
+        // being resent after edits that changed nothing substantive.
+        if self
+            .silent_editor_delivery
+            .as_ref()
+            .is_some_and(|(sent, language)| language == &state.language && *sent == revision)
+            || state.code == state.code_shown
+        {
+            return None;
+        }
+        let body = crate::agent::editor_update_body(state)?;
+        Some(format!(
+            "[SYSTEM EVENT] Silent editor state update; keep listening to the candidate. This requests no reply. Use this current code when answering their latest question.\n{body}"
+        ))
+    }
+
+    pub(super) fn commit_silent_editor(&mut self, state: &RuntimeState) {
+        self.silent_editor_delivery = Some((
+            state.evidence_ledger.code.substantive_revision,
+            state.language.clone(),
+        ));
+    }
+
+    pub(super) fn reset_completed_coding_idle(&mut self) {
+        self.completed_coding_nudges = 0;
+        self.last_successful_completed_nudge = None;
+    }
+
+    pub(super) fn observe_candidate_work(
+        &mut self,
+        state: &RuntimeState,
+        previous_code_revision: u64,
+        previous_test_runs: u32,
+    ) {
+        if state.evidence_ledger.code.revision != previous_code_revision
+            || state.test_runs != previous_test_runs
+        {
+            self.reset_completed_coding_idle();
+        }
+    }
+
+    pub(super) fn commit_watch_prompt(&mut self, prompt: &WatchPrompt, now: Instant) {
+        if prompt.completed_coding_nudge {
+            self.completed_coding_nudges = self.completed_coding_nudges.saturating_add(1);
+            self.last_successful_completed_nudge = Some(now);
+        }
     }
 
     /// `now` is passed in rather than sampled here, like every other method on
@@ -1210,9 +1507,37 @@ impl RuntimeActivity {
         if state.floor_held() || (behavioral && self.behavioral_nudged) {
             return None;
         }
+        let completed_coding = !behavioral
+            && !state.ended
+            && !state.end_requested
+            && crate::agent::phases_evidenced(
+                state,
+                &[
+                    crate::agent::FrameworkPhase::Repeat,
+                    crate::agent::FrameworkPhase::Example,
+                    crate::agent::FrameworkPhase::Algorithm,
+                    crate::agent::FrameworkPhase::Coding,
+                    crate::agent::FrameworkPhase::Test,
+                    crate::agent::FrameworkPhase::Optimizations,
+                ],
+            );
+
+        // Doubling from the attempt throttle to an eight-minute ceiling: a
+        // candidate who has finished and gone quiet is not prompted every two
+        // minutes for the rest of the interview.
+        let cooldown = if completed_coding {
+            crate::agent::SILENCE_COOLDOWN_S * f64::from(1u8 << self.completed_coding_nudges.min(4))
+        } else {
+            crate::agent::SILENCE_COOLDOWN_S
+        };
+        let successful_cadence_ready = !completed_coding
+            || self
+                .last_successful_completed_nudge
+                .is_none_or(|sent| now.saturating_duration_since(sent).as_secs_f64() >= cooldown);
         let decision = timing_decision(&TimingInput {
             agent_busy: self.floor != Floor::Listening,
-            user_talking: now.duration_since(self.last_code_change) < CODE_SETTLE,
+            user_talking: self.candidate_voice_active
+                || now.duration_since(self.last_code_change) < CODE_SETTLE,
             idle_seconds: now
                 .duration_since(
                     self.last_user_speech
@@ -1220,7 +1545,11 @@ impl RuntimeActivity {
                         .max(self.last_agent_speech),
                 )
                 .as_secs_f64(),
-            since_last_nudge_seconds: now.duration_since(self.last_nudge).as_secs_f64(),
+            since_last_nudge_seconds: if successful_cadence_ready {
+                now.duration_since(self.last_nudge).as_secs_f64()
+            } else {
+                0.0
+            },
             since_last_review_seconds: now.duration_since(self.last_review).as_secs_f64(),
             since_last_interjection_seconds: now
                 .duration_since(self.last_interjection)
@@ -1259,6 +1588,7 @@ impl RuntimeActivity {
             return Some(WatchPrompt {
                 text: with_timer(state, behavioral_silence_nudge()),
                 behavioral_nudge: true,
+                completed_coding_nudge: false,
                 allows_silence: false,
             });
         }
@@ -1310,6 +1640,7 @@ impl RuntimeActivity {
         Some(WatchPrompt {
             text: with_timer(state, text),
             behavioral_nudge: false,
+            completed_coding_nudge: decision.silence_nudge && completed_coding,
             allows_silence,
         })
     }

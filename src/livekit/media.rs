@@ -15,7 +15,8 @@ use ::livekit::prelude::{
 use ::livekit::webrtc::audio_frame::AudioFrame;
 use ::livekit::webrtc::audio_source::AudioSourceOptions;
 use ::livekit::webrtc::audio_source::native::NativeAudioSource;
-use ::livekit::webrtc::audio_stream::native::NativeAudioStream;
+use ::livekit::webrtc::audio_stream::native::{NativeAudioStream, NativeAudioStreamOptions};
+use ::livekit::webrtc::audio_track::RtcAudioTrack;
 use ::livekit::webrtc::video_frame::{BoxVideoFrame, VideoFormatType};
 use ::livekit::webrtc::video_stream::native::NativeVideoStream;
 use futures_util::StreamExt;
@@ -29,6 +30,19 @@ use crate::gemini::GeminiLiveSession;
 pub(super) const GEMINI_AUDIO_SAMPLE_RATE: i32 = 16_000;
 
 pub(super) const GEMINI_AUDIO_CHANNELS: i32 = 1;
+
+fn candidate_audio_stream(track: RtcAudioTrack) -> NativeAudioStream {
+    NativeAudioStream::with_options(
+        track,
+        GEMINI_AUDIO_SAMPLE_RATE,
+        GEMINI_AUDIO_CHANNELS,
+        NativeAudioStreamOptions {
+            // Forty seconds covers partial transcription and a bounded
+            // connection/setup attempt without the default 100 ms overflow.
+            queue_size_frames: Some(4000),
+        },
+    )
+}
 
 /// Audio sent to Gemini in forty-millisecond batches of 16 kHz mono PCM16. At a
 /// hundred, the last words before the candidate stopped could wait that long
@@ -107,17 +121,26 @@ pub(super) fn release_if_ended<T>(stream: &mut Option<T>, ended: bool) {
     }
 }
 
-/// Sends one arriving video frame, at most one per interval.
+/// Sends one arriving video frame, at most one per interval, and outside the
+/// candidate's speech only the socket's first. On 3.1 Live every frame counts
+/// toward the turn and stays in the context billed each turn after, while a
+/// presence check needs only the frames that accompany what was said. Images
+/// of the board take their own path and are not held back by this.
 pub(super) async fn pump_video(
     media: &mut CandidateMedia,
     gemini: &mut GeminiLiveSession,
     frame: Option<BoxVideoFrame>,
+    candidate_speaking: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let Some(frame) = frame else {
         media.video = None;
         return Ok(());
     };
-    if !should_send_video_frame(media.last_video_frame.elapsed()) {
+    if !should_send_video_frame(
+        media.last_video_frame.elapsed(),
+        candidate_speaking,
+        media.presence_frame_sent,
+    ) {
         return Ok(());
     }
 
@@ -129,7 +152,8 @@ pub(super) async fn pump_video(
         Ok(bytes) => {
             gemini
                 .send_video_frame(&bytes, crate::gemini::GEMINI_IMAGE_MIME_TYPE)
-                .await?
+                .await?;
+            media.presence_frame_sent = true;
         }
         Err(error) => eprintln!("skipping unencodable video frame: {error}"),
     }
@@ -144,6 +168,13 @@ pub(super) struct CandidateMedia {
     pub(super) audio_bytes: Vec<u8>,
     pub(super) identity: Option<String>,
     last_video_frame: Instant,
+    /// Whether the current socket has a camera frame yet. A replacement clears
+    /// it, since a cold socket has seen none and a resumed one may predate it.
+    pub(super) presence_frame_sent: bool,
+    /// When the microphone last carried voice, measured on every frame. The
+    /// camera gate reads this rather than provider speech events, which a
+    /// session may never receive.
+    pub(super) voiced_at: Option<Instant>,
 }
 
 impl CandidateMedia {
@@ -160,7 +191,16 @@ impl CandidateMedia {
             last_video_frame: Instant::now()
                 .checked_sub(GEMINI_VIDEO_FRAME_INTERVAL)
                 .unwrap_or_else(Instant::now),
+            presence_frame_sent: false,
+            voiced_at: None,
         }
+    }
+
+    /// Voice within the quiet window a pause between sentences fits in.
+    pub(super) fn voiced_recently(&self, now: Instant) -> bool {
+        self.voiced_at.is_some_and(|at| {
+            now.saturating_duration_since(at) < super::turn::CHECKPOINT_VOICE_QUIET
+        })
     }
 
     fn attach_audio(&mut self, track: &RemoteAudioTrack, participant: &RemoteParticipant) {
@@ -168,11 +208,7 @@ impl CandidateMedia {
         // stream does not start mid-sample.
         self.audio_bytes.clear();
         self.identity = Some(participant.identity().to_string());
-        self.audio = Some(NativeAudioStream::new(
-            track.rtc_track(),
-            GEMINI_AUDIO_SAMPLE_RATE,
-            GEMINI_AUDIO_CHANNELS,
-        ));
+        self.audio = Some(candidate_audio_stream(track.rtc_track()));
     }
 }
 
@@ -526,8 +562,12 @@ fn decode_pcm16(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-fn should_send_video_frame(elapsed: Duration) -> bool {
-    elapsed >= GEMINI_VIDEO_FRAME_INTERVAL
+fn should_send_video_frame(
+    elapsed: Duration,
+    candidate_speaking: bool,
+    presence_sent: bool,
+) -> bool {
+    elapsed >= GEMINI_VIDEO_FRAME_INTERVAL && (candidate_speaking || !presence_sent)
 }
 
 /// JPEG sides and RGBA byte count for a frame, or `None` when the dimensions

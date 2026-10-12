@@ -1,6 +1,7 @@
 // Browser playback cannot prove physical audibility through system effects.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_RUNTIME_CONFIG, startStaticServer } from "./source.js";
 
 let browser;
@@ -13,6 +14,7 @@ before(async () => {
       args: [
         "--use-fake-device-for-media-stream",
         "--use-fake-ui-for-media-stream",
+        `--use-file-for-fake-audio-capture=${fileURLToPath(new URL("../../web/audio/test-voice.wav", import.meta.url))}`,
       ],
     });
   } catch (error) {

@@ -405,7 +405,8 @@ where
 ///
 /// The counts land in the interview state whether or not the image ever
 /// reaches the socket, because they are what the candidate drew.
-pub(super) fn record(board: &mut Board, state: &mut RuntimeState, snapshot: BoardSnapshot) {
+pub(super) fn record(board: &mut Board, state: &mut RuntimeState, snapshot: BoardSnapshot) -> bool {
+    let changed = board.latest.as_deref() != Some(snapshot.bytes.as_slice());
     state.board_snapshots = state.board_snapshots.saturating_add(1);
     state.board_strokes = snapshot.strokes;
     state.board_drawn |= snapshot.strokes >= crate::agent::MIN_BOARD_STROKES;
@@ -428,6 +429,7 @@ pub(super) fn record(board: &mut Board, state: &mut RuntimeState, snapshot: Boar
     }
     board.latest = Some(snapshot.bytes);
     board.unsent = true;
+    changed
 }
 
 /// Shows Gemini the newest board if it has not seen it and the interval allows.

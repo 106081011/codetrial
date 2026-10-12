@@ -104,9 +104,10 @@ mod turn;
 // room and hands one borrow of it over for the length of one Gemini event.
 pub use session::execute_tool_call;
 use session::{
-    GeminiEventContext, TestRunLine, TurnCause, close_turns, cut_off_turn, handle_gemini_event,
-    log_clock, prompt_fields, prompt_line, send_model_context, send_model_text,
-    send_wrap_up_and_wait, set_agent_state,
+    ContinuityScope, GeminiEventContext, TestRunLine, TurnCause, close_turns, cut_off_turn,
+    handle_gemini_event, log_clock, prompt_fields, prompt_line, send_model_context,
+    send_model_context_scoped, send_model_text, send_model_text_scoped, send_wrap_up_and_wait,
+    set_agent_state,
 };
 
 use board::{Board, MAX_BOARD_BYTES, handle_board_event};
@@ -356,6 +357,27 @@ impl DeferredRestart {
         self.0
     }
 
+    fn can_spend(&self, activity: &RuntimeActivity, now: Instant) -> bool {
+        self.is_armed() && !activity.incoming_speech_active(now)
+    }
+
+    /// The candidate is mid-utterance with fresh evidence, which is the case a
+    /// speech handoff exists for. Kept apart from [`Self::can_spend`], whose
+    /// speech guard holds an ordinary restart back for exactly this case.
+    fn handoff_due(&self, activity: &RuntimeActivity, now: Instant) -> bool {
+        self.is_armed()
+            && activity.candidate_voice_active
+            && !activity.candidate_transcription_pending(now)
+    }
+
+    /// After speech ends the spend waits out the transcription tail, and no
+    /// provider event need follow it, so the watch keeps retrying until then.
+    fn watch_due(&self, activity: &RuntimeActivity, stalled: bool, now: Instant) -> bool {
+        self.handoff_due(activity, now)
+            || (self.can_spend(activity, now)
+                && (stalled || activity.candidate_voice_active || activity.candidate_voice_ended()))
+    }
+
     /// Some other path replaced the socket. Leaving the advisory armed would
     /// make the first completed turn on the new socket pay for a second
     /// replacement.
@@ -408,7 +430,15 @@ impl DeferredRestart {
 
     /// `take_if_due` read off the room's own state, which is how every caller
     /// asks it, so the settled rule is read the same way at each.
-    fn take_if_settled(&mut self, activity: &RuntimeActivity, audio_playing: bool) -> bool {
+    fn take_if_settled(
+        &mut self,
+        activity: &RuntimeActivity,
+        audio_playing: bool,
+        now: Instant,
+    ) -> bool {
+        if activity.candidate_transcription_pending(now) {
+            return false;
+        }
         self.take_if_due(
             activity.floor,
             audio_playing,
@@ -619,6 +649,7 @@ async fn replace_gemini_session(
     interview: InterviewContext<'_>,
     loops: &mut RoomLoop,
     reply_timeout: bool,
+    speech_handoff: Option<session::SpeechHandoff>,
 ) -> Result<ControlFlow<()>, Box<dyn std::error::Error + Send + Sync>> {
     // Neither a resume nor a cold open on the same key can get past a project
     // that cannot pay, so the budget is not spent learning that twice more.
@@ -649,7 +680,15 @@ async fn replace_gemini_session(
     // on `None`, which would leave suppression stale across a replacement that
     // had no handle to offer.
     let allow_resume = loops.resume_recovery.allow_resume(context.gemini.age());
-    let handle = handle.filter(|_| allow_resume);
+    let handle = handle.filter(|_| {
+        allow_resume
+            && speech_handoff.as_ref().is_none_or(|handoff| {
+                context
+                    .gemini
+                    .checkpoint_age()
+                    .is_some_and(|age| age <= handoff.checkpoint_after.elapsed())
+            })
+    });
 
     // The cold-rebuild line tells the two causes of a 1011 run apart: a resumed
     // conversation that keeps failing stops failing once it is rebuilt, while
@@ -741,9 +780,11 @@ async fn replace_gemini_session(
         .record_model_input(ModelInputKind::LiveSetup, &interview.boot.instructions);
 
     *context.gemini = session;
+    context.media.presence_frame_sent = false;
     loops.resume_recovery.connected(resumed);
     context.activity.live_socket += 1;
     context.activity.reset_context_observations(resumed);
+    context.activity.sync_cut_plausible(context.state);
 
     let (owed, debt, owed_prompt) =
         hand_over(context.state, context.activity, context.output_audio);
@@ -764,18 +805,51 @@ async fn replace_gemini_session(
     close_turns(room, context).await?;
     set_agent_state(room, context.agent_state, AGENT_STATE_LISTENING).await?;
     publish_interviewer_state(room, &interviewer_state(false)).await?;
-    let spoke = brief_replacement(
-        context.gemini,
-        context.state,
-        context.activity,
+    let spoke = if let Some(handoff) = speech_handoff {
         if resumed {
-            Replacement::Resumed { owed }
-        } else {
-            Replacement::Cold { owed }
-        },
-        owed_prompt.as_deref(),
-    )
-    .await;
+            eprintln!("Gemini session resumed; the interview continues where it left off");
+        }
+        match session::send_listening_handoff(
+            context.gemini,
+            context.state,
+            &handoff,
+            resumed,
+            owed_prompt.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => context.activity.commit_silent_editor(context.state),
+            Err(error) => {
+                context.state.needs_cold_brief = true;
+                eprintln!(
+                    "speech-handoff briefing failed ({error}); waiting for the close to be reported"
+                );
+            }
+        }
+
+        // Still owed after the handoff: the next output clears it, and a socket
+        // that drops first names it in its own briefing. A reply owed to
+        // candidate speech has no prompt text and is still owed.
+        if owed || owed_prompt.is_some() {
+            context
+                .activity
+                .owe_prompt(Instant::now(), owed_prompt.clone());
+        }
+        false
+    } else {
+        brief_replacement(
+            context.gemini,
+            context.state,
+            context.activity,
+            if resumed {
+                Replacement::Resumed { owed }
+            } else {
+                Replacement::Cold { owed }
+            },
+            owed_prompt.as_deref(),
+        )
+        .await
+    };
 
     // A cold session remembers none of the drawing, and the briefing's text
     // cannot carry it. Sent whether or not the briefing itself was held for a
@@ -869,6 +943,7 @@ fn hand_over(
     cut_off_turn(activity, output_audio);
     clear_abandoned_socket_work(state, activity);
     activity.evidence_shown = None;
+    activity.silent_editor_delivery = None;
     (owed, debt, owed_prompt)
 }
 
@@ -926,6 +1001,8 @@ async fn brief_replacement(
     // the write most likely to meet a socket that is already gone.
     match send_recovery_brief(gemini, state, replacement, owed_prompt).await {
         Ok(true) => {
+            activity.commit_silent_editor(state);
+
             // The briefing is scaffolding, not the event: a socket that drops
             // before answering it still owes what the briefing asked about, and
             // naming the briefing there would nest it, transcript and all,
@@ -934,7 +1011,12 @@ async fn brief_replacement(
             state.recovery_reply_pending = true;
             true
         }
-        Ok(false) => false,
+        Ok(false) => {
+            if !state.needs_cold_brief {
+                activity.commit_silent_editor(state);
+            }
+            false
+        }
         Err(error) => {
             eprintln!(
                 "connection-recovery briefing failed ({error}); waiting for the close to be reported"
@@ -998,12 +1080,13 @@ async fn send_recovery_brief(
         let context = crate::agent::with_timer(state, context);
         // The briefing carries the whole editor, so the model has now seen it.
         state.code_shown = state.code.clone();
-        send_model_context(
+        send_model_context_scoped(
             gemini,
             state,
             ModelInputKind::Turn,
             &context,
             reply.then_some(TurnCause::Recovery),
+            ContinuityScope::Resumed,
         )
         .await?;
         if reply {
@@ -1027,7 +1110,15 @@ async fn send_recovery_brief(
         // Briefed now, as context that asks for no answer.
         let briefing = crate::agent::with_timer(state, crate::agent::cold_restart(state));
         state.code_shown = state.code.clone();
-        send_model_context(gemini, state, ModelInputKind::Turn, &briefing, None).await?;
+        send_model_context_scoped(
+            gemini,
+            state,
+            ModelInputKind::Turn,
+            &briefing,
+            None,
+            ContinuityScope::ColdOrCheckpoint,
+        )
+        .await?;
         // Delivered, so releasing the hold must not brief this socket again.
         state.needs_cold_brief = false;
         return Ok(false);
@@ -1038,12 +1129,13 @@ async fn send_recovery_brief(
     );
     let briefing = crate::agent::with_timer(state, briefing);
     state.code_shown = state.code.clone();
-    send_model_text(
+    send_model_text_scoped(
         gemini,
         state,
         ModelInputKind::Turn,
         TurnCause::Recovery,
         &briefing,
+        ContinuityScope::ColdOrCheckpoint,
     )
     .await?;
     state.clear_thinking_debt();
@@ -1608,22 +1700,25 @@ async fn maybe_refresh_context(room: &Room, context: &mut GeminiEventContext<'_>
             context.state,
             crate::agent::compressed_context(context.state),
         );
-        match send_model_context(
+        let input_before = context.state.evidence_ledger.metrics.turn_prompt_bytes;
+        match send_model_context_scoped(
             context.gemini,
             context.state,
             ModelInputKind::Turn,
             &checkpoint,
             None,
+            ContinuityScope::ColdOrCheckpoint,
         )
         .await
         {
             Ok(()) => {
                 context.activity.context_refresh_pending = false;
+                context.activity.sync_cut_plausible(context.state);
                 eprintln!(
                     "codetrial context_refresh room={} session={} bytes={}",
                     room.name(),
                     context.activity.live_session_id,
-                    checkpoint.len()
+                    context.state.evidence_ledger.metrics.turn_prompt_bytes - input_before
                 );
             }
             Err(error) => eprintln!(
@@ -1724,9 +1819,11 @@ async fn on_watch_tick(
             log_clock(context.state),
             interview.boot.room_name
         );
-        return replace_gemini_session(room, context, interview, loops, true).await;
+        return replace_gemini_session(room, context, interview, loops, true, None).await;
     }
-    if stalls.spend_restart
+    if loops
+        .deferred_restart
+        .watch_due(context.activity, stalls.spend_restart, tick_at)
         && spend_deferred_restart(room, context, loops, interview, "stall")
             .await?
             .is_break()
@@ -1896,6 +1993,15 @@ async fn on_watch_tick(
     }
     maybe_refresh_context(room, context).await;
 
+    if let Some(body) = context
+        .activity
+        .pending_silent_editor(context.state, tick_at)
+        && let Err(error) =
+            send_silent_editor(context.gemini, context.state, context.activity, &body).await
+    {
+        eprintln!("silent editor context failed ({error}); waiting for the close to be reported");
+    }
+
     // A nudge cannot repair an unanswered turn and would replace the prompt
     // debt (and its timer) before the watchdog could recover it.
     if reply != ReplyWatch::Settled {
@@ -1970,6 +2076,27 @@ enum ReplyWatch {
     Recover,
 }
 
+// VAD edges are not acoustic evidence, and paused frames are discarded rather
+// than collected. Keep this on the same path the room uses to pump each frame.
+/// Returns whether the frame carried voice, which the camera gate reads on
+/// every frame whatever the idle timers make of it.
+fn note_candidate_audio_frame(
+    state: &RuntimeState,
+    activity: &mut RuntimeActivity,
+    frame: Option<&::livekit::webrtc::audio_frame::AudioFrame<'_>>,
+    now: Instant,
+) -> bool {
+    let voiced = !state.paused && frame.is_some_and(media::frame_has_voice);
+    if voiced
+        && (state.context_compression.is_some()
+            || !activity.transcribed_on_socket
+            || activity.candidate_voice_active)
+    {
+        activity.note_candidate_voice(now);
+    }
+    voiced
+}
+
 /// While the floor is held, by a pause or by the candidate keeping it to
 /// think, nothing is waited on and nothing is shown: the interviewer's silence
 /// is the one the candidate asked for, and replies generated meanwhile are
@@ -2003,6 +2130,7 @@ fn update_pause_activity(
     output_audio: &mut OutputAudio,
     now: Instant,
 ) {
+    activity.clear_candidate_voice_activity();
     if !state.paused {
         activity.resume_reply_wait(now);
         return;
@@ -2065,6 +2193,32 @@ fn record_event_prompt<E>(
     }
 }
 
+// This appends history without requesting output. Wire order does not promise
+// consumption order against realtime audio already sent to the provider.
+async fn send_silent_editor(
+    gemini: &mut GeminiLiveSession,
+    state: &mut RuntimeState,
+    activity: &mut RuntimeActivity,
+    body: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    session::send_plain_context(gemini, state, body).await?;
+    activity.commit_silent_editor(state);
+
+    // The model now holds this code, so later updates diff from it rather than
+    // sending it again. Review is governed by the revision the watcher last
+    // reviewed, not by this baseline, so the change stays owed its review.
+    state.code_shown = state.code.clone();
+    eprintln!(
+        "codetrial silent_editor_context local_write=true at_ms={} revision={} language={} source_sha256={} socket={}",
+        crate::agent::elapsed_ms(state),
+        state.evidence_ledger.code.substantive_revision,
+        state.language,
+        state.evidence_ledger.code.latest_digest,
+        activity.live_socket
+    );
+    Ok(())
+}
+
 /// Failed writes leave the behavioral invitation available after reconnect.
 /// Cooldowns still bound retries while the old socket reports its close.
 async fn send_watched_prompt<E>(
@@ -2073,6 +2227,7 @@ async fn send_watched_prompt<E>(
     send: impl std::future::Future<Output = Result<(), E>>,
 ) -> Result<(), E> {
     send.await?;
+    activity.commit_watch_prompt(prompt, Instant::now());
     if prompt.behavioral_nudge {
         activity.behavioral_nudged = true;
     }
@@ -2106,7 +2261,7 @@ async fn on_gemini_event(
             );
         }
         loops.deferred_restart.cancel();
-        if replace_gemini_session(room, context, interview, loops, false)
+        if replace_gemini_session(room, context, interview, loops, false, None)
             .await?
             .is_break()
         {
@@ -2135,7 +2290,11 @@ async fn on_gemini_event(
         if !loops.deferred_restart.request(
             context.activity.floor,
             context.output_audio.is_playing(),
-            context.activity.reply_in_flight(),
+            context.activity.reply_in_flight()
+                || context.activity.candidate_voice_active
+                || context
+                    .activity
+                    .candidate_transcription_pending(Instant::now()),
             context.activity.tool_response_outstanding,
         ) {
             eprintln!(
@@ -2149,7 +2308,7 @@ async fn on_gemini_event(
             );
             return Ok(ControlFlow::Continue(()));
         }
-        if replace_gemini_session(room, context, interview, loops, false)
+        if replace_gemini_session(room, context, interview, loops, false, None)
             .await?
             .is_break()
         {
@@ -2223,10 +2382,63 @@ async fn spend_deferred_restart(
     interview: InterviewContext<'_>,
     trigger: &str,
 ) -> Result<ControlFlow<()>, Box<dyn std::error::Error + Send + Sync>> {
+    // Event and playout callers reach here without the watch-tick gate. The
+    // handoff is judged first: the speech guard on an ordinary spend refuses
+    // the very utterance it finalizes.
+    if loops
+        .deferred_restart
+        .handoff_due(context.activity, Instant::now())
+        && output_settled(context.activity.floor, context.output_audio.is_playing())
+        && !context.activity.tool_response_outstanding
+    {
+        let handoff = session::finalize_speech_handoff(
+            context.gemini,
+            context.state,
+            &mut context.media.audio_bytes,
+        )
+        .await;
+        loops.deferred_restart.cancel();
+        let handoff = match handoff {
+            Ok(handoff) => {
+                for text in &handoff.transcript_fragments {
+                    handle_gemini_event(
+                        room,
+                        context,
+                        GeminiEvent::InputTranscript(text.clone()),
+                        Interruptible::Yes,
+                    )
+                    .await?;
+                }
+                eprintln!(
+                    "speech handoff: prefix_fragments={} discarded_events={} at={} room={}",
+                    handoff.transcript_fragments.len(),
+                    handoff.discarded,
+                    log_clock(context.state),
+                    interview.boot.room_name
+                );
+                Some(handoff)
+            }
+            Err(error) => {
+                eprintln!(
+                    "speech handoff failed ({error}); recovering transport room={}",
+                    interview.boot.room_name
+                );
+                None
+            }
+        };
+        return replace_gemini_session(room, context, interview, loops, false, handoff).await;
+    }
     if !loops
         .deferred_restart
-        .take_if_settled(context.activity, context.output_audio.is_playing())
+        .can_spend(context.activity, Instant::now())
     {
+        return Ok(ControlFlow::Continue(()));
+    }
+    if !loops.deferred_restart.take_if_settled(
+        context.activity,
+        context.output_audio.is_playing(),
+        Instant::now(),
+    ) {
         return Ok(ControlFlow::Continue(()));
     }
     eprintln!(
@@ -2234,7 +2446,7 @@ async fn spend_deferred_restart(
         log_clock(context.state),
         interview.boot.room_name
     );
-    replace_gemini_session(room, context, interview, loops, false).await
+    replace_gemini_session(room, context, interview, loops, false, None).await
 }
 
 /// Wake for a queued playout deadline even when it has already elapsed.
@@ -2481,15 +2693,12 @@ pub(crate) async fn run_room_with_slot(
                     // need; propagating cost the interview.
                     let ended = frame.is_none();
 
-                    // Read by a checkpoint under a compression window, and by
-                    // the idle timers until the socket has transcribed the
-                    // candidate; otherwise the per-frame level is not worth
-                    // computing.
-                    if (turn.state.context_compression.is_some()
-                        || !turn.activity.transcribed_on_socket)
-                        && frame.as_ref().is_some_and(media::frame_has_voice)
-                    {
-                        turn.activity.note_candidate_voice(Instant::now());
+                    // Read by checkpoints and the idle timers before the first
+                    // transcription, and during provider speech to distinguish
+                    // ongoing input from its transcription tail.
+                    let now = Instant::now();
+                    if note_candidate_audio_frame(&turn.state, &mut turn.activity, frame.as_ref(), now) {
+                        media.voiced_at = Some(now);
                     }
                     if turn.state.paused {
                         discard_paused_audio(&mut media);
@@ -2511,7 +2720,9 @@ pub(crate) async fn run_room_with_slot(
                     // the board before it until another edit, which a paused
                     // candidate cannot make. It waits to be shown until the
                     // interview resumes, through the watch tick.
-                    board::record(&mut board, &mut turn.state, snapshot);
+                    if board::record(&mut board, &mut turn.state, snapshot) {
+                        turn.activity.reset_completed_coding_idle();
+                    }
                     if !turn.state.paused {
                         // The candidate is working, even while silent. Without
                         // this the silence nudge counts a candidate who is
@@ -2527,14 +2738,21 @@ pub(crate) async fn run_room_with_slot(
                     ControlFlow::Continue(())
                 }
                 frame = next_video_frame(&mut media.video), if media.video.is_some() => {
+                    let speaking =
+                        turn.activity.candidate_voice_active || media.voiced_recently(Instant::now());
                     if turn.state.paused {
                         release_if_ended(&mut media.video, frame.is_none());
-                    } else if let Err(error) = pump_video(&mut media, &mut gemini, frame).await {
+                    } else if let Err(error) = pump_video(&mut media, &mut gemini, frame, speaking)
+                    .await
+                    {
                         eprintln!("Gemini video write failed ({error}); waiting for the close to be reported");
                     }
                     ControlFlow::Continue(())
                 }
             };
+            if media.audio.is_none() {
+                turn.activity.clear_candidate_voice_activity();
+            }
             if step.is_break() {
                 return Ok(());
             }
@@ -2975,6 +3193,7 @@ async fn begin_button_hold(
     at: Instant,
     grace: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    activity.clear_candidate_voice_activity();
     activity.ignore_input_before_hold(at, grace);
     flush_audio(gemini, candidate_audio).await?;
     gemini.end_audio_turn().await
@@ -3053,6 +3272,7 @@ async fn settle_hold(
     if !(result.yield_turn || release) {
         return effects;
     }
+    context.activity.clear_candidate_voice_activity();
     let finalize_prompt = reply.clone();
     let finalize = async {
         flush_audio(context.gemini, &mut context.media.audio_bytes).await?;
@@ -3163,6 +3383,37 @@ async fn handle_data_packet(
     apply_data_packet(room, context, interview, topic, payload, received).await
 }
 
+fn reduce_data_packet(
+    state: &mut RuntimeState,
+    activity: &mut RuntimeActivity,
+    topic: &str,
+    payload: &serde_json::Value,
+    received: bool,
+    receipt_timestamp_ms: u64,
+) -> crate::agent::DataEventResult {
+    let code_revision_before = state.evidence_ledger.code.revision;
+    let test_runs_before = state.test_runs;
+    let result = if received {
+        apply_data_event_at(
+            state,
+            topic,
+            payload,
+            activity.last_test_reaction.elapsed().as_secs_f64(),
+            receipt_timestamp_ms,
+        )
+    } else {
+        crate::agent::apply_server_event_at(
+            state,
+            topic,
+            payload,
+            activity.last_test_reaction.elapsed().as_secs_f64(),
+            receipt_timestamp_ms,
+        )
+    };
+    activity.observe_candidate_work(state, code_revision_before, test_runs_before);
+    result
+}
+
 /// Applies a packet after any judgment wait has been settled. Released round
 /// transitions enter here so new speech or a slow judge cannot renew the hold.
 async fn apply_data_packet(
@@ -3179,23 +3430,14 @@ async fn apply_data_packet(
     let receipt_timestamp_ms = crate::current_epoch_millis();
     let packet_at = Instant::now();
     let was_requested = context.state.thinking_hold.is_requested();
-    let mut result = if received {
-        apply_data_event_at(
-            context.state,
-            topic,
-            payload,
-            context.activity.last_test_reaction.elapsed().as_secs_f64(),
-            receipt_timestamp_ms,
-        )
-    } else {
-        crate::agent::apply_server_event_at(
-            context.state,
-            topic,
-            payload,
-            context.activity.last_test_reaction.elapsed().as_secs_f64(),
-            receipt_timestamp_ms,
-        )
-    };
+    let mut result = reduce_data_packet(
+        context.state,
+        context.activity,
+        topic,
+        payload,
+        received,
+        receipt_timestamp_ms,
+    );
     if result.update_last_code_change {
         context.activity.last_code_change = Instant::now();
     }

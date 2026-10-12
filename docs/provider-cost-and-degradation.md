@@ -3,6 +3,25 @@
 What one interview costs upstream, what bounds it when a provider misbehaves,
 and what the candidate sees when it does.
 
+## Token optimization evidence
+
+The measured reduction depends on which part of the workload is counted.
+Repair-input savings do not imply the same reduction over an interview, and a
+lower-cost session that loses candidate evidence is not a passing optimization.
+The detailed experiments below retain both successful measurements and rejected
+variants.
+
+| Change or comparison | Measured result | Decision and scope |
+| --- | --- | --- |
+| Remove JSON whitespace outside strings in repair contents | 16,364 to 13,649 tokens over seven actual tokenizer calls; 16.59% fewer | Meaning-preserving repair-content reduction; not whole-request or session savings. Malformed and oversized inputs retain the previous fallback. |
+| Compact tool and phase-enum setup | 39 plus 18 fewer tokens in matched setup cohorts | Small startup reduction; not a material full-session estimate. |
+| Completed-coding silence backoff | After the first check, successful nudges in one quiet episode are spaced 60, 120, 240, then 480 seconds | Scheduler change; no measured Gemini token saving. Actual savings require a passing matched native comparison. |
+| Longer first report attempt | One request versus two in a matched local fixture with a 22-second initial response | Isolated prototype; same canonical fixture delivered. No measured Gemini-token savings; retry checks and deadline-aware alternative pending. |
+| Configured 12,000/6,000 window with editor recovery | 237,229 versus 256,846 observed tokens; 7.64% fewer in one full eleven-stage pair | The default control failed currentness and recall. This is not equivalent-passing-pair evidence or a general recommendation. |
+| Supported whiteboard recall/report repair with that window | Candidate 310,036 observed tokens; control at least 455,460 plus unknown failed-call usage | Both failed recall; the control also failed report delivery. Rejected as adoption evidence; no savings estimate. |
+| Historical-image prototype with 12,000/6,000 window | At least 82,978 tokens through four stages, plus four failed phase requests with unknown usage | Stopped for a missing required current-board read. No full-session comparison or savings estimate. |
+| Report evidence indices instead of canonical evidence objects | 51,427 versus 33,055 observed tokens in the bounded HTTP comparison | Rejected: extra repairs increased observed usage by 55.58% and grounding still failed. |
+
 ## What an interview spends
 
 Each admitted interview spends one LiveKit and Gemini live-session open, plus
@@ -81,7 +100,12 @@ Every Live turn is billed on the whole context it runs in, retained audio and
 images included, so what stays in the context costs again on every later turn.
 Candidate video, off by default, therefore sends one frame in five seconds and
 asks for the low media resolution; the camera is there for presence, and the
-code reaches the model as text.
+code reaches the model as text. On `gemini-3.1-flash-live-preview` the default
+turn coverage is `TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO`, so every frame
+also counts toward the turn. Outside candidate speech, judged from the
+microphone's own voice level on every frame or from provider speech detection,
+each Live socket therefore receives one presence frame and no more; during speech frames keep the
+five-second interval. Board images take their own path and are unaffected.
 
 Final reporting has a shared hard budget of five Gemini HTTP calls across
 initial generation, up to two semantic repairs, and transient retries. The
@@ -274,10 +298,14 @@ infer an account balance from them.
   loop, and once with `phase=startup` and no socket count when the interview
   failed before its first turn, a first open that was refused included.
 - `gemini report`, `gemini interim` and `gemini phase` lines carry the room,
-  call number and retry count of each HTTP call. A failed call has no usage
-  line; every one is counted from `gemini report transport_failed` (with
-  `final=true` when it was not retried), `interim review skipped` and
-  `phase judge skipped`, and none is assumed free.
+  call number and retry count of each HTTP call. Failures are counted from
+  `gemini report transport_failed` (with `final=true` when it was not retried),
+  `interim review skipped` and `phase judge skipped`. A failure before usage is
+  decoded has unknown cost, never an assumed zero. A successful HTTP response
+  with usage but no usable text can log both usage and a failure for the same
+  call; do not count that failure as a second request or extra unknown cost.
+  Call numbers reset between operations, so room and call number alone do not
+  uniquely correlate every attempt across a complete interview.
 
 The counters keep prompt, response, cached, thought, tool-use prompt and total
 counts, plus modality details for prompt, response, tool-use and cached tokens.
@@ -288,7 +316,12 @@ means it is partial; details may also sum to less than their scalar. The
 analyzer reports a direction with a zero total and no breakdown, such as tool
 use in a session without tools, as `none_reported`, never as complete: an
 unused direction and one the provider left out look the same. Never add
-cached tokens to the prompt total.
+cached tokens to the prompt total. With no `usageMetadata`, an HTTP record has
+`usage_samples=0` and the analyzer increments `records_without_known_usage`;
+its displayed numeric zeros are observed counters, not evidence of free work.
+Check these counts, HTTP failures and incomplete-session flags before comparing
+totals. Missing individual scalar fields also log as zero and cannot be
+reconstructed from these logs alone.
 
 `turn_complete_samples` counts observations that shared a frame with
 `turnComplete`. Usage is recorded when its frame is decoded, before that frame's
@@ -352,12 +385,39 @@ lines are named as omitted and remain available through `read_editor`; omission
 is not evidence that a follow-up was unused or that no refusal occurred. A
 replacement socket drops a pending checkpoint, because its recovery already
 carries local state, and socket recovery keeps its own larger budgets.
+Whiteboard checkpoints omit editor and test data and direct visual claims to a
+fresh `read_board` snapshot. During the behavioral round, they omit the drawing
+and prohibit returning to it merely to recover earlier work. They also omit
+coding-run progress cues. Coding checkpoint output is unchanged by these mode
+guards; no token reduction is claimed for this correctness fix.
 
 Only while a pair is configured do `read_editor`, `log_hint` and
 `record_framework_evidence` answers also carry the latest unanswered candidate
-utterance, as quoted data, so a reply owed across a cut is not lost. Without a
-pair nothing leaves the context during a tool call, and the text would only be
-billed again on every later turn.
+utterance, as quoted data, so a reply owed across a cut is not lost, and only
+while a cut is plausible (as below) and the floor is not held. Without a
+pair these application-level additions are omitted. Provider-default sliding
+window compression still applies; an unset pair does not establish that the
+provider retains every earlier tool call or utterance.
+
+Configured compression also appends bounded continuity to platform text and
+context inputs after the interviewer has first spoken, while a cut is
+plausible: before any usage has been measured, after a cut was detected, or
+while the last comparable prompt count is in the upper half of the band between
+the target and the trigger. Just after a cut the context sits near the target,
+so the reminder, which stays in the context billed on every later turn, is not
+carried again until the context has grown back toward the trigger. This includes the
+latest unanswered local candidate utterance, quoted as data, and preserves the
+current round and evidenced steps without replaying the opening or full problem
+restatement. In coding, a prior candidate opening is also quoted within 750
+bytes once a later candidate turn exists; it is omitted during the behavioral
+round. A new timer reading remains last. The first response on a cut context precedes its
+usage-triggered checkpoint; the reminder covers that gap. Paused, thinking-held
+and ending interviews receive no reminder. The reminder is not added under
+provider defaults. Recovery briefings already carry the recent transcript and
+their own no-restart rules, so they receive only the owed-question rule and any
+opening or latest candidate line their transcript tail no longer holds whole.
+The added text is part of measured model input, so comparisons must include its
+cost rather than assume it is free.
 
 A lower threshold reduces the history retained for later turns, and may remove
 information a follow-up needs or add compression latency. Final reporting still
@@ -365,6 +425,38 @@ uses the full local transcript and editor. The credentialed probes that compare
 arms and check recall are the ignored tests in `tests/unit/livekit/cost.rs`,
 outside the credential-free gate; their file header lists the environment they
 need.
+
+Recall from a supplied checkpoint does not establish continuity across a cut.
+The `live_compression_continuity_quality` probe starts with the real greeting
+under the original interview instructions, accumulates synthetic editor context,
+and requires the runtime's compression detector to fire. It checks responses
+before sending the resulting checkpoint, so a renewed greeting in the first
+response after a cut fails rather than being hidden by later recovery. Its
+output retains synthetic replies, usage and failures for inspection. Like the
+other direct-socket probes, it does not validate LiveKit playout, and the
+detector remains a heuristic rather than a provider compression event.
+
+## Retrieving omitted conversation
+
+`read_conversation` is available on both interview surfaces. It reads only
+recorded candidate and interviewer turns from the room's local transcript.
+Platform events and private review notes are excluded; instructions inside
+recorded speech remain untrusted data. The read adds no framework evidence,
+hint or phase change. Runtime `live_tool_response` logs identify the tool, serialized response-body bytes and acceptance, without arguments or returned speech. Unknown model-supplied tool names are logged as `unknown`. These byte counts exclude the function-response envelope and do not estimate provider tokens.
+
+`query` optionally selects a case-insensitive substring. `fromTurn` starts at a
+one-based spoken turn, and `fromByte` continues within a long turn. Follow the
+returned `nextTurn` and `nextByte` with the same query; null cursors mean no
+matching speech remains for that query and cursor. If the full query occurs nowhere in the spoken transcript, the tool tries the longest query word of 3 to 100 bytes that occurs there, returns the original matching speech, and identifies that fallback as `matchedQuery`. The notice distinguishes a word match from an exact phrase match; continue paging with `matchedQuery`. Exact phrase matches are never broadened. A page has at most four turns and stays below 6,000
+serialized JSON bytes. UTF-8 boundaries and JSON escaping are included in the
+budget, so even one long utterance remains retrievable across pages.
+
+Recovery briefs direct the model to retrieve missing earlier details before
+answering from memory. This avoids resending the entire conversation in every
+checkpoint. Its declaration, tool continuations and actual response bodies
+still cost tokens and are included in comparisons; availability alone does not
+prove that the model uses retrieval correctly. Final reports continue to read
+the full local transcript.
 
 ## What a whiteboard interview adds
 
@@ -377,7 +469,7 @@ apart. The counts are the server's own `live_turn_usage` lines, read with
 `scripts/analyze-gemini-usage.py`.
 
 | Opening | Prompt tokens, first generation | Runs |
-|---|---|---|
+| ---------- | ------------------------------- | ---------------- |
 | Editor | 5,431 | 3 of 3 identical |
 | Whiteboard | 5,408 | 3 of 3 identical |
 
@@ -385,7 +477,7 @@ Per text, counted with `countTokens` on `gemini-3.1-flash-lite`. The parts sum
 to the live difference exactly (47 - 56 - 14 = -23):
 
 | Text | Editor | Whiteboard | Difference | Billed |
-|---|---|---|---|---|
+| ------------------- | ------ | ---------- | ---------- | ---------------- |
 | System instructions | 4,408 | 4,455 | +47 | every generation |
 | Tool declarations | 429 | 373 | -56 | every generation |
 | Greeting | 170 | 156 | -14 | every generation |
@@ -416,3 +508,142 @@ analyzer's `mean_growth_per_observation` inherits that. Whole-session totals are
 not comparable between the arms either, because a silent synthetic candidate
 triggers an editor review on every code change in one arm and silence nudges in
 the other.
+
+### Compact default editor reads
+
+When `read_editor` starts at line 1 (including an omitted `fromLine`), at least
+80 leading line comments or blank lines may be compacted by representing each
+run of identical consecutive lines once, with its original line range. Every
+distinct note remains visible. This applies only if the compacted preface fits
+4 KiB and saves at least 4,000 bytes. Unknown languages, block comments, unique
+or oversized prefaces and buffers without implementation retain the original
+paged read. Only the language's unambiguous line-comment prefix is recognized.
+
+Preface and implementation share the existing 32,000-byte numbered-source
+budget and per-line character cap. The answer preserves original line numbers;
+explicit reads after line 1 expand the original buffer, and continuation
+pointers expose later code. Only a read that shows the whole buffer marks it
+shown: a default read that stops at its page limit neither carries the
+proactive review nor moves the baseline, and neither does a later-line page or a
+requested hint whose editor page stopped at its limit, so a change they did not
+show is still reviewed. Requested hints use the same compact view. The
+latest test record, evidence state and timer remain available through the same
+tool; reports retain the original editor.
+
+A tool-assisted Live usage observation may sum prompt tokens across several
+model invocations. It remains fully included in spend counters, but is not a
+single context-size reading. It never seeds the next comparable peak, including
+when usage arrives before the tool call reveals that the turn used tools.
+A tool turn's largest observed total is an upper bound on each invocation's
+context: if even that total is sufficiently below the previous completed
+single-generation count, it can establish a decrease. The watcher waits for the
+turn's completion before making that comparison and clears the old baseline
+after detecting such a cut. Other tool turns retain the last comparable
+reading; cuts they cannot prove await a comparable observation. The
+pre-generation and tool continuity reminders remain in force.
+
+`live_spoken_compression_continuity_quality` requires
+`CODETRIAL_COST_SPEECH_DIR` containing synthetic `restate.pcm` and
+`question.pcm` fixtures (16 kHz mono signed 16-bit little-endian). The former
+states the full two-sum contract and the latter asks about Rust iterator
+`position`. It requires newly transcribed speech and received audio, preserves
+failed results, and checks continuity across heuristic context cuts under the
+original interview instructions. `CODETRIAL_COST_SPEECH_STREAM_END=1` also
+flushes each fixture as a microphone mute would; that run does not validate
+continuous-microphone endpointing. A missing or incomplete transcription fails
+the restatement precondition, not just the continuity assertion.
+
+The speech harness consumes events and answers tools while streaming its PCM,
+as the room does. An unmuted run continues sending silent PCM while awaiting
+the reply; ending the fixture is not treated as ending the microphone stream. `CODETRIAL_COST_SPEECH_INITIAL_TEXT=1` establishes the full
+restatement through authored synthetic text, then tests the spoken follow-up
+fixture across cuts. That mode validates native speech after a text opening,
+not recognition of the initial spoken restatement. Its audio timing starts
+when input streaming starts and includes the utterance itself. Follow-up PCM
+fixtures are bounded to 30 seconds; the full restatement is bounded to 75.
+
+Recovery quotes the stage direction whose reply was lost. Its final platform
+clock is superseded by the recovery's fresh final clock and is removed;
+timer-like text inside candidate code stays. Extra anti-script instructions
+were withdrawn after all three live trials still read the private timer and
+the added wording increased prompt usage.
+Configured continuity similarly moves the trusted event clock to the end rather
+than retaining two readings. This removes redundant input bytes, not provider
+turns, and is no proof that the model will never read private metadata aloud.
+
+When a configured window adds a timed tool-continuity block, editor, board and
+hint results omit their own final canonical platform timer. The continuity
+block retains the current clock; candidate source containing timer-like text
+stays unchanged. Without the continuity block, the tool result keeps its timer.
+This removes one redundant clock sentence from qualifying replies, rather than
+claiming a whole-session saving or guaranteed silence about private metadata.
+Evidence-recording replies carry the configured continuity note without a clock.
+Recording evidence is not a time-reading operation; platform events and read
+tools retain their clock sources.
+A tool batch sends its continuity note once, in the final eligible response.
+The final eligible checklist snapshot also appears once per batch, including
+without compression. All results and per-tool state changes remain in order in
+the same response message; standalone tool execution retains its note and
+checklist. Input accounting counts the response bodies after these omissions. A coding evidence response can also carry a changed, parsed editor excerpt once, in the final eligible response, while the interview is active and the floor is free. This supplies the current edit when speech has deferred the editor watch. Unchanged buffers, incomplete parses, held floors and whiteboard or behavioral rounds add no editor excerpt. The excerpt uses the watch limits and preserves original-source access through `read_editor`. The excerpt includes whether a recorded run covers the current code or execution is disabled, so an edit does not imply passing tests. A successful response carrying changed code asks for the same proactive review within the reply already owed, with the candidate's latest question first. This includes a default editor read; explicit reads after line 1 keep their paging behavior and do not consume the review. The review is added once using the final batch state, only for a parsed substantive revision the watcher has not reviewed. Input accounting counts the finished bodies after this addition. Only a successful socket write consumes that revision; failed writes and later edits remain eligible for a watcher review. This avoids requesting another generation solely to review code just delivered. Its bytes are counted as part of the actual response; its token effect still requires live comparison.
+
+A timed stage direction requesting a reply
+sends its final platform clock as a separate non-generating clientContent update,
+then sends the action with turnComplete true on that same ordered channel. It
+keeps the clock outside the utterance the model is asked to produce. A completed
+client turn interrupts the reply the provider owes or is producing, even before
+its first output. The socket reader therefore counts the socket busy from
+detected candidate speech, its input transcription, an interruption or model
+output, and the socket itself from any send that requests a reply, until a turn
+completes. Provider evidence lapses after 10 seconds and a requested reply
+stays owed through the longest configurable reply deadline, 120 seconds, which
+the reply watchdog enforces first; either way a lost turn end cannot hold every
+later request on the fallback. While busy, the action goes as
+realtime text instead and is answered after the reply in flight. The two parts are counted as
+one input, before either write. Untimed input and context requesting no
+reply retain their existing sends. This is a
+privacy/continuity measure, not a standalone token saving: requested-time probes
+used additional read_editor calls to obtain a fresh clock. The native browser
+and compression comparisons must include that overhead.
+
+Provider voiceActivity START/END observations hold silence nudges, editor watch
+prompts, context refreshes, and idle assessment calls while Gemini detects
+candidate speech. END starts the silence interval afresh. These observations
+are not transcripts or assessment evidence. Socket replacement, pause, and
+microphone teardown and explicit Thinking/yield stream finalization clear the active flag.
+A START with no microphone or provider evidence for 10 seconds is treated as if
+its END had arrived then, so one lost END cannot hold these back for the rest of
+the socket. Raw microphone energy retains its
+existing noise safeguard after the socket first transcribes the candidate.
+This avoids treating a delayed transcript as silence; measured savings still
+require a completed comparison including any additional tool calls.
+
+An advisory transport restart also waits during the quiet transcription tail:
+provider speech is still active but the microphone has been quiet for at least
+500 ms, or a provider END arrived less than two seconds ago. This gives the
+transcript and reply a chance to settle before a stale checkpoint is resumed.
+The periodic room watch checks a held advisory during provider-detected speech,
+without waiting for another provider event or a reply stall. The handoff is
+judged before the speech guard that holds an ordinary restart back, since that
+guard refuses exactly the voiced speech the handoff finalizes. For ongoing
+microphone speech, an advisory restart first ends the old audio stream and waits up to two seconds for its partial transcription. A silent
+context update cancels the reply to that prefix. The replacement receives the
+full finalized prefix as JSON-quoted untrusted speech and silent interview
+context before queued microphone audio continues; it is asked to answer only
+after the remaining speech finishes. This silent update carries no clock;
+requested-time answers can obtain a fresh reading from the editor or board
+tool. Only a checkpoint issued after cancellation
+can resume this handoff, and a resumed socket receives the listening note
+alone and keeps its context baseline, since the provider still holds that
+context; otherwise the replacement gets the full cold briefing in front of it. A
+platform request the replaced socket still owed is named in the note and stays
+owed. Provider events the replaced socket emits while the prefix is finalized
+are discarded, and their count is logged. A failed
+briefing leaves the local cold briefing due rather than ending the interview.
+Microphone ingress buffers up to 40 seconds while the room loop reconnects,
+about 1.3 MB of PCM plus queue overhead at 16 kHz mono. The oldest frames still
+drop on overflow; ordinary consumption does not wait for this buffer to fill.
+No transcription within the handoff budget falls back to normal recovery, as
+does an actual transport close. This does not promise lossless recovery from an
+unavailable provider. Microphone energy is measured during provider activity
+even after the first transcription, without letting that energy suppress
+silence nudges indefinitely.
