@@ -39,6 +39,33 @@ fn frame_of(samples: usize) -> AudioFrame<'static> {
     }
 }
 
+#[tokio::test]
+async fn candidate_audio_retains_frames_while_the_room_reconnects() {
+    let source = NativeAudioSource::new(
+        AudioSourceOptions::default(),
+        u32::try_from(GEMINI_AUDIO_SAMPLE_RATE).unwrap(),
+        u32::try_from(GEMINI_AUDIO_CHANNELS).unwrap(),
+        0,
+    );
+    let track = LocalAudioTrack::create_audio_track(
+        "reconnect-buffer",
+        RtcAudioSource::Native(source.clone()),
+    );
+    let mut stream = candidate_audio_stream(track.rtc_track());
+    for marker in 1..=60 {
+        let mut frame = frame_of(160);
+        frame.data.to_mut().fill(marker);
+        source.capture_frame(&frame).await.unwrap();
+    }
+    for marker in 1..=60 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("buffered audio frame missing")
+            .unwrap();
+        assert!(frame.data.iter().all(|sample| *sample == marker));
+    }
+}
+
 /// The agent publishes its voice as a microphone track.
 ///
 /// Left to the default the track has no source, and a client looking for
@@ -380,8 +407,27 @@ fn only_frames_louder_than_room_noise_count_as_voice() {
 
 #[test]
 fn video_frame_throttle_sends_one_frame_in_five_seconds() {
-    assert!(!should_send_video_frame(Duration::from_millis(4_999)));
-    assert!(should_send_video_frame(Duration::from_secs(5)));
+    assert!(!should_send_video_frame(
+        Duration::from_millis(4_999),
+        true,
+        true
+    ));
+    assert!(should_send_video_frame(Duration::from_secs(5), true, true));
+}
+
+/// Outside speech a socket gets one presence frame and no more; speech opens
+/// the camera again at the same interval.
+#[test]
+fn video_frames_outside_speech_stop_after_the_presence_frame() {
+    let due = Duration::from_secs(5);
+    assert!(should_send_video_frame(due, false, false));
+    assert!(!should_send_video_frame(due, false, true));
+    assert!(should_send_video_frame(due, true, true));
+    assert!(!should_send_video_frame(
+        Duration::from_secs(4),
+        false,
+        false
+    ));
 }
 
 // Moved here from `livekit.rs`, where they tested these functions from the room
@@ -535,4 +581,16 @@ fn channel_order_survives_the_libyuv_naming_trap() {
             "alpha belongs in byte 3 of the {where_}, got {pixel:?}"
         );
     }
+}
+
+/// The camera gate's own witness: voice within the quiet window, from the
+/// frames themselves, so it holds without any provider speech event.
+#[test]
+fn voiced_recently_spans_the_quiet_window_only() {
+    let start = Instant::now();
+    let mut media = CandidateMedia::new();
+    assert!(!media.voiced_recently(start));
+    media.voiced_at = Some(start);
+    assert!(media.voiced_recently(start + Duration::from_millis(1_999)));
+    assert!(!media.voiced_recently(start + super::super::turn::CHECKPOINT_VOICE_QUIET));
 }

@@ -544,6 +544,10 @@ fn apply_test_results(
         state.tested_code = None;
         state.tested_passed = None;
     }
+    state.last_test_run_code = submitted.map(|(code, language)| super::TestedCode {
+        language: language.to_string(),
+        code: code.to_string(),
+    });
     state.last_test_run = Some(payload.clone());
     state.test_runs += 1;
     state

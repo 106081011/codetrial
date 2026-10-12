@@ -3,6 +3,7 @@
 // the interview is on.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_RUNTIME_CONFIG,
@@ -262,6 +263,7 @@ async function mediaBrowser(t) {
     args: [
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
+      `--use-file-for-fake-audio-capture=${fileURLToPath(new URL("../../web/audio/test-voice.wav", import.meta.url))}`,
     ],
   });
   t.after(() => media.close());

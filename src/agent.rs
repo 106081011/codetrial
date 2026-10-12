@@ -71,7 +71,11 @@ pub use prompts::{
     test_runner_unavailable_reaction, test_setup_error_reaction, time_warning,
     uncredited_test_results_reaction, unrecorded_earlier_phases, with_owed_reply, wrap_up,
 };
-pub(crate) use prompts::{editor_tool_continuity, end_interview_refusal, report_transcript_lines};
+pub(crate) use prompts::{
+    editor_tool_continuity, end_interview_refusal, evidenced_among, latest_candidate_continuity,
+    numbered_bounded_line, numbered_from_with_limit, pending_candidate_line,
+    read_editor_text_from_numbered, report_transcript_lines, tool_editor_review,
+};
 pub(crate) use report::{MAX_ERROR_CHARS, Sanitized, sanitize_report_candidate};
 pub use report::{
     MAX_SUMMARY_TEXT, ReportRounds, fallback_report, final_report, names_published_problem,
@@ -171,9 +175,9 @@ pub const THINKING_CHECK_IN_S: u64 = 120;
 pub(crate) const THINKING_RELEASE_COOLDOWN: std::time::Duration =
     std::time::Duration::from_secs(10);
 
-pub const INTERVIEW_CONTRACT_BUNDLE_VERSION: u32 = 32;
-pub const LIVE_PROMPT_VERSION: u32 = 23;
-pub const REPORT_PROMPT_VERSION: u32 = 19;
+pub const INTERVIEW_CONTRACT_BUNDLE_VERSION: u32 = 33;
+pub const LIVE_PROMPT_VERSION: u32 = 24;
+pub const REPORT_PROMPT_VERSION: u32 = 20;
 pub const RUBRIC_VERSION: u32 = 1;
 pub const REPORT_SCHEMA_VERSION: u32 = 3;
 
@@ -758,6 +762,13 @@ pub struct TestedCode {
     pub code: String,
 }
 
+impl TestedCode {
+    /// The same source the editor holds now, language included.
+    fn is_current(&self, state: &RuntimeState) -> bool {
+        self.language == state.language && self.code == state.code
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeState {
     pub started_at: std::time::Instant,
@@ -862,6 +873,10 @@ pub struct RuntimeState {
     pub board_resend_requested: bool,
     pub transcript: Vec<String>,
     pub last_test_run: Option<serde_json::Value>,
+    /// Submitted source belonging to the displayed report, including runs
+    /// that earned no Test credit. Missing submission leaves provenance
+    /// unknown.
+    pub last_test_run_code: Option<TestedCode>,
     pub test_runs: u32,
     /// The language and code of the latest run that executed cases against
     /// code the candidate wrote, as the browser submitted it to the runner.
@@ -983,6 +998,12 @@ pub struct RuntimeState {
     /// Held here alone, so the checkpoint and the tool answers cannot disagree
     /// about whether compression is on.
     pub context_compression: Option<crate::config::GeminiContextCompression>,
+    /// Whether the next input could be the one the provider cuts the context
+    /// on, as the room last measured it. Under compression the continuity a
+    /// cut needs rides beside every input, and stays in the context billed
+    /// again each turn, so it is attached only while this holds. True until
+    /// something has been measured.
+    pub context_cut_plausible: bool,
 }
 
 impl RuntimeState {
@@ -1064,6 +1085,7 @@ impl Default for RuntimeState {
             board_resend_requested: false,
             transcript: Vec::new(),
             last_test_run: None,
+            last_test_run_code: None,
             test_runs: 0,
             tested_code: None,
             tested_passed: None,
@@ -1094,6 +1116,7 @@ impl Default for RuntimeState {
             end_requested: false,
             ended: false,
             context_compression: None,
+            context_cut_plausible: true,
         }
     }
 }
@@ -1841,7 +1864,58 @@ pub(crate) fn tested_code_is_exact(state: &RuntimeState) -> bool {
     state
         .tested_code
         .as_ref()
-        .is_some_and(|tested| tested.language == state.language && tested.code == state.code)
+        .is_some_and(|tested| tested.is_current(state))
+}
+
+/// Displayed-report outcomes belong to exact submitted source, independently
+/// of the older run whose Test credit can survive edits or later outages.
+pub(crate) fn latest_test_report_is_exact(state: &RuntimeState) -> bool {
+    state.last_test_run.is_some()
+        && state
+            .last_test_run_code
+            .as_ref()
+            .is_some_and(|tested| tested.is_current(state))
+}
+
+/// Trusted source provenance, outside candidate-controlled report text. No
+/// notice is needed when the exact source is known or no editor outcome
+/// applies.
+pub(crate) fn latest_test_report_provenance_note(state: &RuntimeState) -> Option<&'static str> {
+    if state.interview_mode.is_whiteboard()
+        || state.code_execution_disabled
+        || state.last_test_run.is_none()
+        || latest_test_report_is_exact(state)
+    {
+        None
+    } else if state.last_test_run_code.is_some() {
+        Some(
+            "The displayed browser report belongs to different source or language. Its outcome does not establish whether the current editor code passes or fails.",
+        )
+    } else {
+        Some(
+            "The displayed browser report has no recorded source provenance. Its outcome does not establish whether the current editor code passes or fails.",
+        )
+    }
+}
+
+/// What changed since the model last saw the editor, with the execution status
+/// that keeps the update from reading as a new run. One wording for every
+/// route that delivers an update, so the routes cannot drift apart.
+pub(crate) fn editor_update_body(state: &RuntimeState) -> Option<String> {
+    changed_excerpt(&state.language, &state.code_shown, &state.code)
+        .map(|excerpt| format!("{excerpt}\n{}", editor_update_execution_status(state)))
+}
+
+/// Editor delivery carries no new execution and must not promote retained
+/// Test credit into an outcome for code that has since changed.
+pub(crate) fn editor_update_execution_status(state: &RuntimeState) -> &'static str {
+    if state.code_execution_disabled {
+        "Execution is disabled. Verify with hand traces, not a new test run."
+    } else if latest_test_report_is_exact(state) {
+        "The latest browser report belongs to this exact source and language; use only its recorded outcome. This update is not a new run."
+    } else {
+        "This update ran no tests. Do not assume earlier failures or passes describe this code."
+    }
 }
 
 /// Whether `code` in `language` is still the code `tested` holds, by the Test
@@ -1981,11 +2055,12 @@ pub const MIN_BOARD_STROKES: u32 = 3;
 /// once -- an interview cannot run for 585 million years, but the type says it
 /// could and the conversion has to answer for it.
 pub fn elapsed_ms(state: &RuntimeState) -> u64 {
-    state
-        .started_at
-        .elapsed()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
+    saturating_ms(state.started_at.elapsed())
+}
+
+/// Whole milliseconds, saturating rather than wrapping past `u64::MAX`.
+pub(crate) fn saturating_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 /// How long ago the candidate's newest board arrived, in whole seconds, or
@@ -2373,11 +2448,7 @@ pub(crate) fn skip_unassessed_star(state: &mut RuntimeState, summary: &str) {
     if state.interview_loop == InterviewLoop::CodingOnly {
         return;
     }
-    let at_ms = state
-        .started_at
-        .elapsed()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
+    let at_ms = elapsed_ms(state);
     for phase in [
         FrameworkPhase::Situation,
         FrameworkPhase::Task,
@@ -2757,7 +2828,7 @@ fn candidate_speech(line: &str) -> Option<&str> {
 }
 
 /// What `speaker` said in `line`, if it is their turn.
-fn speaker_speech<'a>(line: &'a str, speaker: &str) -> Option<&'a str> {
+pub(crate) fn speaker_speech<'a>(line: &'a str, speaker: &str) -> Option<&'a str> {
     line.strip_prefix(speaker)
         .and_then(|rest| rest.strip_prefix(": "))
 }
@@ -2879,10 +2950,41 @@ pub fn minutes_left(state: &RuntimeState) -> i64 {
     spoken_minutes_from_remaining_seconds(remaining)
 }
 
+/// The two halves of `timer_line`, shared with `unstamped_event` so a reworded
+/// clock is still the one it strips.
+const TIMER_PREFIX: &str = "TIMER: about ";
+const TIMER_SUFFIX: &str = " minutes remain on the candidate's countdown.";
+
 /// The one sentence any prompt says the time in, so a model told these are the
 /// only readings it has can recognize every one of them.
 pub fn timer_line(minutes: i64) -> String {
-    format!("TIMER: about {minutes} minutes remain on the candidate's countdown.")
+    format!("{TIMER_PREFIX}{minutes}{TIMER_SUFFIX}")
+}
+
+/// Removes the final clock from a trusted platform event or tool result before
+/// it is moved beside a fresh reading. Interior clocks can be candidate text
+/// and stay.
+pub(crate) fn unstamped_event(prompt: &str) -> &str {
+    let Some((prefix, clock)) = prompt.rsplit_once(TIMER_PREFIX) else {
+        return prompt;
+    };
+    let Some(event) = prefix
+        .strip_suffix(' ')
+        .or_else(|| prefix.strip_suffix('\n'))
+    else {
+        return prompt;
+    };
+    let Some(minutes) = clock.strip_suffix(TIMER_SUFFIX) else {
+        return prompt;
+    };
+    if minutes
+        .parse::<i64>()
+        .is_ok_and(|value| value.to_string() == minutes)
+    {
+        event
+    } else {
+        prompt
+    }
 }
 
 /// A stage direction, with the clock the model does not have.

@@ -532,3 +532,23 @@ async fn asking_for_a_board_before_one_arrived_sends_nothing() {
     assert_eq!(board.last_sent, None);
     assert!(frames.try_recv().is_err());
 }
+
+#[test]
+fn completed_coding_idle_board_progress_uses_encoded_bytes_not_repeated_receipt() {
+    let mut board = Board::new();
+    let mut state = RuntimeState::default();
+    let snapshot = |bytes, strokes| BoardSnapshot {
+        bytes,
+        strokes,
+        checkpoint: None,
+    };
+    assert!(record(&mut board, &mut state, snapshot(vec![1, 2, 3], 1)));
+    assert!(!record(&mut board, &mut state, snapshot(vec![1, 2, 3], 2)));
+    assert!(record(&mut board, &mut state, snapshot(vec![1, 2, 4], 2)));
+    assert!(
+        record(&mut board, &mut state, snapshot(vec![0], 0)),
+        "clearing is new work"
+    );
+    assert!(!record(&mut board, &mut state, snapshot(vec![0], 0)));
+    assert_eq!(state.board_snapshots, 5);
+}

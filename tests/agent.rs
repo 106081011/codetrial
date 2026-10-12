@@ -620,6 +620,10 @@ fn prompt_samples() -> Value {
     let tested_state = RuntimeState {
         last_test_run: Some(json!({"language": "python", "passed": 3, "total": 3})),
         test_runs: 1,
+        last_test_run_code: Some(TestedCode {
+            language: "python".to_string(),
+            code: "def two_sum(nums, target):".to_string(),
+        }),
         tested_code: Some(TestedCode {
             language: "python".to_string(),
             code: "def two_sum(nums, target):".to_string(),
@@ -655,6 +659,7 @@ fn prompt_samples() -> Value {
                 &RuntimeState {
                     last_test_run: Some(json!({"setupError": "runner unavailable"})),
                     tested_code: None,
+                    last_test_run_code: None,
                     ..tested_state.clone()
                 },
                 "",
@@ -897,7 +902,14 @@ fn evaluation_reaction(case: &Value, state: &mut RuntimeState) -> String {
         assert_eq!(state.code, code);
     }
     match reaction["kind"].as_str().expect("reaction kind is text") {
-        "silence" => silence_nudge(state, "", changed_excerpt("python", "", code).as_deref()),
+        "silence" => {
+            // An empty scenario editor is an empty production editor: the nudge
+            // leaves out the branch the server can rule out itself.
+            if code.is_empty() {
+                state.code.clear();
+            }
+            silence_nudge(state, "", changed_excerpt("python", "", code).as_deref())
+        }
         "proactive" => proactive_review(state, "", changed_excerpt("python", "", code).as_deref()),
         "tests_failed" | "tests_passed" => {
             let all_passed = reaction["kind"] == "tests_passed";

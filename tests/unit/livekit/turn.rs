@@ -1590,3 +1590,738 @@ fn editor_only_judgments_are_paced_and_capped_apart_from_speech() {
         .push("Candidate: and constant extra space".to_string());
     assert_eq!(claim(&mut state, at), (true, MAX_EDITOR_PHASE_JUDGES));
 }
+
+/// The provider's tool-assisted turn summed its model invocations: the next
+/// single-generation prompt shrank without compression. These are observed
+/// counts from a controlled provider-default probe, not an invented cut.
+#[test]
+fn tool_generation_sums_do_not_schedule_a_false_checkpoint() {
+    let pair = window(20_000, 8_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[4210]);
+    activity.note_tool_response(Instant::now());
+    let usage = crate::gemini::TokenUsage {
+        prompt: 12_494,
+        samples: 1,
+        ..Default::default()
+    };
+    activity.account_live_usage("tool-probe", "0:00.000", Some("tool"), pair, usage);
+    activity.observe_turn_complete(pair);
+    assert_eq!(activity.live_usage.prompt, 12_494);
+    assert_eq!(activity.peak_prompt_tokens, 4210);
+    complete_turn(&mut activity, pair, &[8337]);
+    assert!(!activity.context_refresh_pending);
+    complete_turn(&mut activity, pair, &[19_000]);
+    complete_turn(&mut activity, pair, &[8_000]);
+    assert!(activity.context_refresh_pending);
+}
+
+#[test]
+fn a_tool_response_marks_usage_even_when_the_input_cause_changes() {
+    let pair = window(20_000, 8_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[4210]);
+    activity.note_tool_response(Instant::now());
+    activity.account_live_usage(
+        "tool-probe",
+        "0:00.000",
+        Some("turn"),
+        pair,
+        crate::gemini::TokenUsage {
+            prompt: 12_494,
+            samples: 1,
+            ..Default::default()
+        },
+    );
+    activity.observe_turn_complete(pair);
+    complete_turn(&mut activity, pair, &[8337]);
+    assert!(!activity.context_refresh_pending);
+    activity.note_tool_response(Instant::now());
+    activity.reset_context_observations(true);
+    complete_turn(&mut activity, pair, &[20_000]);
+    complete_turn(&mut activity, pair, &[8_000]);
+    assert!(activity.context_refresh_pending);
+}
+
+#[test]
+fn tool_cause_alone_marks_an_aggregate_usage_observation() {
+    let pair = window(20_000, 8_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[4210]);
+    activity.account_live_usage(
+        "tool-probe",
+        "0:00.000",
+        Some("tool"),
+        pair,
+        crate::gemini::TokenUsage {
+            prompt: 12_494,
+            samples: 1,
+            ..Default::default()
+        },
+    );
+    activity.observe_turn_complete(pair);
+    complete_turn(&mut activity, pair, &[8337]);
+    assert!(!activity.context_refresh_pending);
+    assert_eq!(activity.live_usage.prompt, 12_494);
+}
+
+#[test]
+fn a_tool_total_below_the_previous_single_prompt_can_prove_a_cut() {
+    let pair = window(32_000, 16_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[31_352]);
+    activity.note_tool_response(Instant::now());
+    complete_turn(&mut activity, pair, &[27_251]);
+    assert!(activity.context_refresh_pending);
+
+    activity.context_refresh_pending = false;
+    complete_turn(&mut activity, pair, &[13_700]);
+    assert!(!activity.context_refresh_pending);
+}
+
+#[test]
+fn usage_before_a_tool_call_does_not_poison_the_comparable_peak() {
+    let pair = window(20_000, 8_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[4210]);
+    activity.observe_prompt_tokens(pair, 12_494);
+    activity.note_tool_response(Instant::now());
+    complete_turn(&mut activity, pair, &[12_500]);
+    complete_turn(&mut activity, pair, &[8337]);
+    assert!(!activity.context_refresh_pending);
+}
+
+#[test]
+fn a_tool_cut_comparison_waits_for_all_usage_observations() {
+    let pair = window(32_000, 16_000);
+    let mut activity = RuntimeActivity::new(Instant::now());
+    complete_turn(&mut activity, pair, &[31_352]);
+    activity.note_tool_response(Instant::now());
+    activity.observe_prompt_tokens(pair, 5000);
+    assert!(!activity.context_refresh_pending);
+    complete_turn(&mut activity, pair, &[40_000]);
+    assert!(!activity.context_refresh_pending);
+    complete_turn(&mut activity, pair, &[32_000]);
+    assert!(!activity.context_refresh_pending);
+}
+
+#[test]
+fn only_a_resumed_socket_retains_the_tool_cut_reference() {
+    let pair = window(32_000, 16_000);
+    for resumed in [false, true] {
+        let mut activity = RuntimeActivity::new(Instant::now());
+        complete_turn(&mut activity, pair, &[31_352]);
+        activity.reset_context_observations(resumed);
+        activity.note_tool_response(Instant::now());
+        complete_turn(&mut activity, pair, &[27_251]);
+        assert_eq!(activity.context_refresh_pending, resumed);
+    }
+}
+
+#[test]
+fn provider_activity_holds_prompts_until_speech_ends_after_prior_transcription() {
+    let start = Instant::now();
+    let now = start + Duration::from_secs(300);
+    let mut state = RuntimeState::default();
+    let mut activity = RuntimeActivity::new(start);
+    activity.transcribed_on_socket = true;
+    activity.note_candidate_voice_activity(true, now);
+    let end = now + Duration::from_secs(82);
+    assert!(activity.watch_prompt(&mut state, end).is_none());
+    activity.context_refresh_pending = true;
+    assert!(!activity.can_refresh_context(false, false, false, end));
+    assert!(!activity.interim_review_due(&state, end));
+    activity.note_candidate_voice_activity(false, end);
+    assert!(
+        activity
+            .watch_prompt(&mut state, end + Duration::from_secs(5))
+            .is_none()
+    );
+    assert!(
+        activity
+            .watch_prompt(&mut state, end + Duration::from_secs(300))
+            .is_some()
+    );
+}
+
+#[test]
+fn replacement_does_not_inherit_provider_activity_even_when_resumed() {
+    for resumed in [false, true] {
+        let now = Instant::now();
+        let mut activity = RuntimeActivity::new(now);
+        activity.note_candidate_voice_activity(true, now);
+        activity.reset_context_observations(resumed);
+        assert!(!activity.candidate_voice_active);
+    }
+}
+
+fn completed_coding_idle_state(start: Instant) -> RuntimeState {
+    let mut state = RuntimeState {
+        started_at: start,
+        code_execution_disabled: true,
+        code: "def solve(): return 1".into(),
+        ..RuntimeState::default()
+    };
+    for phase in [
+        "repeat",
+        "example",
+        "algorithm",
+        "coding",
+        "test",
+        "optimizations",
+    ] {
+        crate::agent::record_framework_evidence(
+            &mut state,
+            &serde_json::json!({
+            "phase":phase,"source":"candidate_speech","kind":"observed",
+            "confidence":90,"summary":"Candidate completed this step."}),
+        )
+        .unwrap();
+    }
+    state
+}
+
+#[test]
+fn completed_coding_idle_backoff_keeps_first_then_doubles_to_an_eight_minute_cap() {
+    let start = Instant::now();
+    let mut state = completed_coding_idle_state(start);
+    let mut activity = RuntimeActivity::new(start);
+    activity.last_nudge = start - Duration::from_secs(30);
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(24))
+            .is_none()
+    );
+    let first = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(25))
+        .unwrap();
+    assert!(first.completed_coding_nudge && !first.allows_silence);
+    activity.commit_watch_prompt(&first, start + Duration::from_secs(25));
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(84))
+            .is_none()
+    );
+    let second = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(85))
+        .unwrap();
+    activity.commit_watch_prompt(&second, start + Duration::from_secs(85));
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(204))
+            .is_none()
+    );
+    let third = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(205))
+        .unwrap();
+    activity.commit_watch_prompt(&third, start + Duration::from_secs(205));
+    let mut sent = 205;
+    for gap in [240, 480, 480] {
+        assert!(
+            activity
+                .watch_prompt(&mut state, start + Duration::from_secs(sent + gap - 1))
+                .is_none()
+        );
+        let next = activity
+            .watch_prompt(&mut state, start + Duration::from_secs(sent + gap))
+            .unwrap();
+        activity.commit_watch_prompt(&next, start + Duration::from_secs(sent + gap));
+        sent += gap;
+    }
+}
+
+#[test]
+fn completed_coding_idle_backoff_preserves_editor_reviews_and_unfinished_coding() {
+    let start = Instant::now();
+    let mut state = completed_coding_idle_state(start);
+    let mut activity = RuntimeActivity::new(start);
+    activity.completed_coding_nudges = 2;
+    activity.last_successful_completed_nudge = Some(start);
+    activity.last_nudge = start;
+    state.evidence_ledger.code.substantive_revision = 1;
+    state.evidence_ledger.code.parser_observation = Some(crate::agent::CodeObservation::Parsed);
+    let review = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(45))
+        .unwrap();
+    assert!(review.allows_silence && !review.completed_coding_nudge);
+    for missing in [false, true] {
+        let mut state = completed_coding_idle_state(start);
+        if missing {
+            state.framework_evidence.pop();
+        } else {
+            state.framework_evidence[0].kind = crate::agent::EvidenceKind::Skipped;
+        }
+        let mut activity = RuntimeActivity::new(start);
+        activity.completed_coding_nudges = 2;
+        let nudge = activity
+            .watch_prompt(&mut state, start + Duration::from_secs(30))
+            .unwrap();
+        assert!(!nudge.completed_coding_nudge && !nudge.allows_silence);
+    }
+}
+
+#[test]
+fn completed_coding_idle_backoff_resets_on_candidate_work_not_socket_or_bookkeeping() {
+    let start = Instant::now();
+    let mut state = completed_coding_idle_state(start);
+    let mut activity = RuntimeActivity::new(start);
+    activity.completed_coding_nudges = 2;
+    activity.reset_context_observations(true);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    activity.reset_context_observations(false);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    let previous_revision = state.evidence_ledger.code.revision;
+    activity.observe_candidate_work(&state, previous_revision, state.test_runs);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    state
+        .framework_evidence
+        .push(state.framework_evidence[0].clone());
+    activity.observe_candidate_work(&state, previous_revision, state.test_runs);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    state.evidence_ledger.code.revision += 1;
+    activity.observe_candidate_work(&state, previous_revision, state.test_runs);
+    assert_eq!(activity.completed_coding_nudges, 0);
+    activity.completed_coding_nudges = 2;
+    state.test_runs += 1;
+    activity.observe_candidate_work(
+        &state,
+        state.evidence_ledger.code.revision,
+        state.test_runs - 1,
+    );
+    assert_eq!(activity.completed_coding_nudges, 0);
+    activity.completed_coding_nudges = 2;
+    activity.note_candidate_voice_activity(true, start);
+    assert_eq!(activity.completed_coding_nudges, 0);
+    activity.completed_coding_nudges = 2;
+    activity.note_candidate_finished(start, false);
+    assert_eq!(activity.completed_coding_nudges, 0);
+}
+
+#[test]
+fn completed_coding_idle_backoff_preserves_behavioral_and_hold_voice_gates() {
+    let start = Instant::now();
+    let mut state = completed_coding_idle_state(start);
+    let mut activity = RuntimeActivity::new(start);
+    activity.completed_coding_nudges = 2;
+    state.paused = true;
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(300))
+            .is_none()
+    );
+    state.paused = false;
+    activity.note_candidate_voice_activity(true, start + Duration::from_secs(300));
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(301))
+            .is_none()
+    );
+    activity.note_candidate_voice_activity(false, start + Duration::from_secs(301));
+    state.behavioral_round_started = true;
+    let nudge = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(331))
+        .unwrap();
+    assert!(nudge.behavioral_nudge && !nudge.completed_coding_nudge);
+    activity.behavioral_nudged = true;
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(600))
+            .is_none()
+    );
+}
+
+#[test]
+fn completed_coding_idle_backoff_observes_real_reducer_edits_and_test_receipts() {
+    let now = Instant::now();
+    let mut state = completed_coding_idle_state(now);
+    let mut activity = RuntimeActivity::new(now);
+    let previous = state.code.clone();
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":previous,"language":"python"}),
+        99.0,
+    );
+    // Seed the authoritative ledger using a changed accepted packet.
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":format!("{previous} "),"language":"python"}),
+        99.0,
+    );
+    let previous = state.code.clone();
+    let previous_revision = state.evidence_ledger.code.revision;
+    let runs = state.test_runs;
+    activity.completed_coding_nudges = 2;
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":previous,"language":"python"}),
+        99.0,
+    );
+    activity.observe_candidate_work(&state, previous_revision, runs);
+    assert_eq!(
+        activity.completed_coding_nudges, 2,
+        "identical accepted edit is no new episode"
+    );
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":format!("{previous}\n"),"language":"python"}),
+        99.0,
+    );
+    activity.observe_candidate_work(&state, previous_revision, runs);
+    assert_eq!(activity.completed_coding_nudges, 0);
+    let previous_revision = state.evidence_ledger.code.revision;
+    state.code_execution_disabled = false;
+    activity.completed_coding_nudges = 2;
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_TEST_RESULTS,
+        &serde_json::json!({"passed":0,"total":1,"language":"python"}),
+        99.0,
+    );
+    assert!(state.test_runs > runs);
+    activity.observe_candidate_work(&state, previous_revision, runs);
+    assert_eq!(activity.completed_coding_nudges, 0);
+}
+
+#[test]
+fn completed_coding_idle_backoff_ignores_duplicate_inactive_vad_edges() {
+    let now = Instant::now();
+    let mut activity = RuntimeActivity::new(now);
+    activity.completed_coding_nudges = 2;
+    activity.note_candidate_voice_activity(false, now);
+    activity.note_candidate_voice_activity(false, now);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    activity.note_candidate_voice_activity(true, now);
+    assert_eq!(activity.completed_coding_nudges, 0);
+    activity.completed_coding_nudges = 2;
+    activity.note_candidate_voice_activity(false, now);
+    assert_eq!(activity.completed_coding_nudges, 0);
+}
+
+#[test]
+fn completed_coding_idle_backoff_tracks_language_only_revision_and_rejects_malformed_edits() {
+    let now = Instant::now();
+    let mut state = RuntimeState::default();
+    let mut activity = RuntimeActivity::new(now);
+    let code = "value = 1\n";
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":code,"language":"python"}),
+        99.0,
+    );
+    let previous = state.evidence_ledger.code.revision;
+    activity.completed_coding_nudges = 2;
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"code":code,"language":"javascript"}),
+        99.0,
+    );
+    assert!(state.evidence_ledger.code.revision > previous);
+    activity.observe_candidate_work(&state, previous, state.test_runs);
+    assert_eq!(activity.completed_coding_nudges, 0);
+    let previous = state.evidence_ledger.code.revision;
+    activity.completed_coding_nudges = 2;
+    crate::agent::apply_data_event(
+        &mut state,
+        crate::runtime::TOPIC_CODE_UPDATE,
+        &serde_json::json!({"language":"python"}),
+        99.0,
+    );
+    activity.observe_candidate_work(&state, previous, state.test_runs);
+    assert_eq!(activity.completed_coding_nudges, 2);
+}
+
+#[tokio::test]
+async fn completed_coding_idle_later_failed_send_retries_after_thirty_without_spending_success() {
+    let start = Instant::now() - Duration::from_secs(210);
+    let mut state = completed_coding_idle_state(start);
+    let mut activity = RuntimeActivity::new(start);
+    let first = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(30))
+        .unwrap();
+    activity.commit_watch_prompt(&first, start + Duration::from_secs(30));
+    let second = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(90))
+        .unwrap();
+    activity.commit_watch_prompt(&second, start + Duration::from_secs(90));
+    let failed = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(210))
+        .unwrap();
+    assert!(
+        crate::livekit::send_watched_prompt(&mut activity, &failed, async {
+            Err::<(), _>(std::io::Error::other("closed socket"))
+        })
+        .await
+        .is_err()
+    );
+    activity.unsend_watch_prompt(&mut state);
+    assert_eq!(activity.completed_coding_nudges, 2);
+    assert_eq!(
+        activity.last_successful_completed_nudge,
+        Some(start + Duration::from_secs(90))
+    );
+    assert!(
+        activity
+            .watch_prompt(&mut state, start + Duration::from_secs(239))
+            .is_none()
+    );
+    let retry = activity
+        .watch_prompt(&mut state, start + Duration::from_secs(240))
+        .unwrap();
+    assert!(retry.completed_coding_nudge);
+    assert_eq!(activity.completed_coding_nudges, 2);
+}
+
+#[test]
+fn incoming_speech_defers_output_wait_and_gets_a_fresh_reply_budget_after_end() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.mark_prompted(start, Some("resume"), false);
+    activity.note_candidate_voice_activity(true, start);
+    for seconds in 0..=180 {
+        let now = start + Duration::from_secs(seconds);
+        activity.note_candidate_voice(now);
+        assert!(!activity.reply_timed_out(now, false));
+        assert!(!activity.reply_visibly_late(now, false));
+        assert!(!activity.generation_stalled(now));
+        let stalls = activity.settle_stalls(now, false);
+        assert!(!stalls.prompt_released && !stalls.spend_restart);
+    }
+    let end = start + Duration::from_secs(181);
+    activity.note_candidate_voice_activity(false, end);
+    assert_eq!(activity.prompted_at, Some(end));
+    assert_eq!(activity.prompt_text.as_deref(), Some("resume"));
+    assert!(!activity.reply_timed_out(
+        end + activity.reply_timeout - Duration::from_millis(1),
+        false
+    ));
+    assert!(activity.reply_timed_out(end + activity.reply_timeout, false));
+}
+
+#[test]
+fn stale_vad_edges_without_pcm_do_not_keep_renewing_reply_debt() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.mark_prompted(start, Some("resume"), false);
+    activity.note_candidate_voice_activity(true, start);
+    activity.note_candidate_voice(start);
+    let quiet = start + CHECKPOINT_VOICE_QUIET;
+    activity.settle_stalls(quiet, false);
+    assert_eq!(activity.prompted_at, Some(quiet));
+    for seconds in 3..=60 {
+        let now = start + Duration::from_secs(seconds);
+        activity.note_candidate_voice_activity(true, now);
+        activity.note_candidate_voice_activity(false, now);
+        activity.settle_stalls(now, false);
+        assert_eq!(activity.prompted_at, Some(quiet));
+    }
+    assert!(activity.reply_timed_out(start + Duration::from_secs(60), false));
+}
+
+#[test]
+fn incoming_speech_rebases_all_owed_clocks_once_and_reset_discards_acoustic_history() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.mark_prompted(start, Some("resume"), false);
+    activity.awaiting_reply_since = Some(start);
+    activity.note_tool_response(start);
+    activity.generating = true;
+    activity.last_output_at = Some(start);
+    activity.note_candidate_voice_activity(true, start);
+    activity.note_candidate_voice(start);
+    let end = start + Duration::from_secs(1);
+    activity.note_candidate_voice_activity(false, end);
+    assert_eq!(activity.prompted_at, Some(end));
+    assert_eq!(activity.awaiting_reply_since, Some(end));
+    assert_eq!(activity.tool_response_at, Some(end));
+    assert_eq!(activity.last_output_at, Some(end));
+    activity.note_candidate_voice_activity(false, end + Duration::from_secs(1));
+    assert_eq!(activity.prompted_at, Some(end));
+    activity.clear_candidate_voice_activity();
+    activity.note_candidate_voice_activity(true, end + Duration::from_secs(2));
+    assert!(!activity.incoming_speech_active(end + Duration::from_secs(2)));
+    assert!(activity.reply_timed_out(end + activity.reply_timeout, false));
+}
+
+#[test]
+fn pcm_before_vad_rebases_short_speech_once_without_reusing_noise_edges() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.mark_prompted(start, Some("resume"), false);
+    let speech = start + Duration::from_secs(60);
+    activity.note_candidate_voice(speech);
+    activity.note_candidate_voice_activity(true, speech + Duration::from_millis(10));
+    let end = speech + Duration::from_millis(100);
+    activity.note_candidate_voice_activity(false, end);
+    assert_eq!(activity.prompted_at, Some(end));
+    assert!(!activity.reply_timed_out(end, false));
+    for millis in [200, 300, 500] {
+        let edge = speech + Duration::from_millis(millis);
+        activity.note_candidate_voice_activity(true, edge);
+        activity.note_candidate_voice_activity(false, edge);
+        assert_eq!(activity.prompted_at, Some(end));
+    }
+    assert!(activity.reply_timed_out(end + activity.reply_timeout, false));
+}
+
+#[test]
+fn incoming_pcm_without_vad_does_not_suspend_stalled_generation() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.generating = true;
+    activity.last_output_at = Some(start);
+    let late = start + activity.reply_timeout;
+    activity.note_candidate_voice(late);
+    assert!(!activity.incoming_speech_active(late));
+    assert!(activity.generation_stalled(late));
+    assert!(activity.reply_timed_out(late, false));
+    activity.note_candidate_voice_activity(true, late);
+    assert!(!activity.generation_stalled(late));
+    assert!(!activity.reply_timed_out(late, false));
+    activity.note_candidate_voice_activity(false, late + Duration::from_secs(1));
+    assert_eq!(activity.last_output_at, Some(late + Duration::from_secs(1)));
+    assert!(activity.reply_timed_out(
+        late + Duration::from_secs(1) + activity.reply_timeout,
+        false
+    ));
+}
+
+/// A speech-start whose end the provider never sent stops holding the
+/// interview back once neither the microphone nor the provider renews it, and
+/// voiced frames keep a real long answer alive past the same bound.
+#[test]
+fn a_speech_start_without_its_end_expires_once_its_evidence_is_stale() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.note_candidate_voice_activity(true, start);
+    let before = start + STALE_VOICE_ACTIVITY - Duration::from_millis(1);
+    activity.settle_stalls(before, false);
+    assert!(activity.candidate_voice_active);
+
+    let stale = start + STALE_VOICE_ACTIVITY;
+    activity.settle_stalls(stale, false);
+    assert!(!activity.candidate_voice_active);
+    assert!(activity.candidate_transcription_pending(stale));
+    assert!(!activity.candidate_transcription_pending(stale + CHECKPOINT_VOICE_QUIET));
+
+    let mut talking = RuntimeActivity::new(start);
+    talking.note_candidate_voice_activity(true, start);
+    let mut at = start;
+    while at < start + STALE_VOICE_ACTIVITY * 2 {
+        at += Duration::from_millis(500);
+        talking.note_candidate_voice(at);
+        talking.settle_stalls(at, false);
+    }
+    assert!(talking.candidate_voice_active);
+}
+
+/// Continuity rides beside an input only while the next one could be cut:
+/// before anything is measured, once a cut is detected, and in the upper half
+/// of the band between target and trigger. Without compression, never.
+#[test]
+fn continuity_is_due_only_while_a_context_cut_is_plausible() {
+    let compression = Some(crate::config::GeminiContextCompression {
+        trigger_tokens: 24_000,
+        target_tokens: 12_000,
+    });
+    let mut activity = RuntimeActivity::new(Instant::now());
+    assert!(!activity.context_cut_plausible(None));
+    assert!(activity.context_cut_plausible(compression));
+
+    activity.observe_prompt_tokens(compression, 12_500);
+    activity.observe_turn_complete(compression);
+    assert!(!activity.context_cut_plausible(compression));
+
+    activity.observe_prompt_tokens(compression, 17_999);
+    activity.observe_turn_complete(compression);
+    assert!(!activity.context_cut_plausible(compression));
+
+    activity.observe_prompt_tokens(compression, 18_000);
+    activity.observe_turn_complete(compression);
+    assert!(activity.context_cut_plausible(compression));
+
+    activity.observe_prompt_tokens(compression, 12_100);
+    activity.observe_turn_complete(compression);
+    assert!(activity.context_refresh_pending);
+    assert!(activity.context_cut_plausible(compression));
+    activity.context_refresh_pending = false;
+    assert!(!activity.context_cut_plausible(compression));
+
+    // Growth through a tool turn keeps no comparable count, but it can still
+    // bring the context back toward the trigger.
+    activity.observe_prompt_tokens(compression, 13_000);
+    activity.observe_turn_complete(compression);
+    activity.note_tool_response(Instant::now());
+    activity.observe_prompt_tokens(compression, 19_000);
+    activity.observe_turn_complete(compression);
+    assert!(!activity.context_refresh_pending);
+    assert!(activity.context_cut_plausible(compression));
+
+    // The next comparable count replaces the bound.
+    activity.observe_prompt_tokens(compression, 13_500);
+    activity.observe_turn_complete(compression);
+    assert!(!activity.context_cut_plausible(compression));
+}
+
+/// Voiced frames owe the unfinished reply a wait only while the provider also
+/// reports speech; frames alone may be room noise.
+#[test]
+fn voiced_frames_without_provider_speech_owe_no_wait() {
+    let now = Instant::now();
+    let mut activity = RuntimeActivity::new(now);
+    activity.mark_prompted(now, Some("question"), false);
+    assert!(activity.reply_unfinished());
+    activity.note_candidate_voice(now);
+    assert!(!activity.incoming_speech_owed);
+    activity.note_candidate_voice_activity(true, now);
+    activity.note_candidate_voice(now);
+    assert!(activity.incoming_speech_owed);
+}
+
+/// A tool review of a revision already reviewed moves no clocks; the
+/// settle window is half-open, so silent delivery is due at exactly
+/// `CODE_SETTLE`; and syncing writes the plausibility the state reads.
+#[test]
+fn review_settling_silent_delivery_and_cut_sync_hold_at_their_edges() {
+    let now = Instant::now();
+    let mut activity = RuntimeActivity::new(now);
+    activity.substantive_revision_at_last_review = 3;
+    let reviewed = activity.last_review;
+    let interjected = activity.last_interjection;
+    activity.settle_tool_editor_review(Some(3), true, now + Duration::from_secs(5));
+    assert_eq!(activity.last_review, reviewed);
+    assert_eq!(activity.last_interjection, interjected);
+    activity.settle_tool_editor_review(Some(4), true, now + Duration::from_secs(5));
+    assert_eq!(activity.last_review, now + Duration::from_secs(5));
+
+    let mut state = RuntimeState {
+        language: "python".into(),
+        code: "def solve():\n    return 1\n".into(),
+        ..RuntimeState::default()
+    };
+    state.evidence_ledger.code.parser_observation = Some(crate::agent::CodeObservation::Parsed);
+    state.evidence_ledger.code.substantive_revision = 1;
+    let mut speaking = RuntimeActivity::new(now);
+    speaking.last_code_change = now;
+    speaking.note_candidate_voice_activity(true, now + CODE_SETTLE);
+    speaking.note_candidate_voice(now + CODE_SETTLE);
+    assert!(
+        speaking
+            .pending_silent_editor(&state, now + CODE_SETTLE)
+            .is_some()
+    );
+
+    state.context_compression = Some(crate::config::GeminiContextCompression {
+        trigger_tokens: 24_000,
+        target_tokens: 12_000,
+    });
+    activity.observe_prompt_tokens(state.context_compression, 12_500);
+    activity.observe_turn_complete(state.context_compression);
+    activity.sync_cut_plausible(&mut state);
+    assert!(!state.context_cut_plausible);
+}

@@ -127,6 +127,24 @@ fn disabled_execution_prompts_request_traces_across_recovery_and_editor_events()
 }
 
 #[test]
+fn recovered_event_discards_only_its_final_superseded_clock() {
+    let state = RuntimeState::default();
+    let event = "[SYSTEM EVENT] Answer the candidate's question.\nBEGIN UNTRUSTED EDITOR\n# TIMER: about 99 minutes remain on the candidate's countdown.\nEND UNTRUSTED EDITOR";
+    let stamped = with_timer(&state, event.into());
+    let recovered = owed_reply(Some(&stamped));
+    assert!(recovered.contains(event));
+    assert_eq!(recovered.matches("TIMER:").count(), 1);
+    for suffix in [
+        " TIMER: about soon minutes remain on the candidate's countdown.",
+        " TIMER: about +30 minutes remain on the candidate's countdown.",
+        " TIMER: about 30 minutes remain on the candidate's countdown. trailing text",
+    ] {
+        let original = format!("{event}{suffix}");
+        assert!(owed_reply(Some(&original)).contains(&original));
+    }
+}
+
+#[test]
 fn prompt_golden_digest_matches_versions() {
     let expected: Value = serde_json::from_str(include_str!("../golden/prompts.json"))
         .expect("prompt fixture should parse");
@@ -140,8 +158,8 @@ fn prompt_golden_digest_matches_versions() {
     // its hash is a string nothing checks. The pair is still asserted, because
     // the failure worth catching is a version bumped with the golden left
     // alone, which a digest comparison on its own reads as fine.
-    let recorded_versions = (23, 19);
-    let recorded_digest = "16157f097696ed3caf64bf96f8f3ff82d988250f3889049c98a5cc064de5c236";
+    let recorded_versions = (24, 20);
+    let recorded_digest = "e8c59828e6c3f3a8b9fcf8841a35f7f77c21ed8b2501458bc43eb17641c99a02";
 
     assert_eq!(
         (LIVE_PROMPT_VERSION, REPORT_PROMPT_VERSION),
@@ -175,7 +193,9 @@ fn unpausing_delivers_the_cold_brief_the_pause_deferred() {
     );
 
     let reply = resumed.generate_reply.expect("resuming makes Jim speak");
-    assert!(reply.contains("Any restored memory may predate the latest local events"));
+    assert!(
+        reply.contains("Restored memory may be stale: reconcile it with this current local record")
+    );
     assert!(reply.contains("def two_sum"));
 
     // Paid once sent, so it is not delivered again on the next pause, and a
@@ -1269,17 +1289,17 @@ fn interview_contract_versions_are_one_closed_bundle() {
         "the bundle table has no row for {INTERVIEW_CONTRACT_BUNDLE_VERSION}"
     );
 
-    assert_eq!(INTERVIEW_CONTRACT_BUNDLE_VERSION, 32);
-    assert_eq!(LIVE_PROMPT_VERSION, 23);
-    assert_eq!(REPORT_PROMPT_VERSION, 19);
+    assert_eq!(INTERVIEW_CONTRACT_BUNDLE_VERSION, 33);
+    assert_eq!(LIVE_PROMPT_VERSION, 24);
+    assert_eq!(REPORT_PROMPT_VERSION, 20);
     assert_eq!(RUBRIC_VERSION, 1);
     assert_eq!(REPORT_SCHEMA_VERSION, 3);
     assert_eq!(
         interview_contract_json(),
         json!({
-            "bundleVersion": 32,
-            "livePromptVersion": 23,
-            "reportPromptVersion": 19,
+            "bundleVersion": 33,
+            "livePromptVersion": 24,
+            "reportPromptVersion": 20,
             "rubricVersion": 1,
             "reportSchemaVersion": 3,
         })
@@ -1859,4 +1879,253 @@ fn compressed_editor_numbers_candidate_markers_and_preserves_unicode_ending() {
     assert!(blocks.iter().map(|block| block.len()).sum::<usize>() <= 1800);
     assert!(blocks[0].starts_with("1| "));
     assert!(blocks[1].ends_with("FINAL_TARGET"));
+}
+
+#[test]
+fn whiteboard_checkpoint_uses_board_recovery_and_excludes_editor_and_test_data() {
+    for disabled in [false, true] {
+        let mut state = RuntimeState {
+            interview_mode: InterviewMode::Whiteboard,
+            code_execution_disabled: disabled,
+            code: "PRIVATE_EDITOR_FIXTURE".into(),
+            last_test_run: Some(json!({"setupError":"PRIVATE_TEST_FIXTURE".repeat(6000)})),
+            transcript: vec!["Candidate: I drew a map and a scan arrow.".into()],
+            ..RuntimeState::default()
+        };
+        let checkpoint = compressed_context(&state);
+        assert!(checkpoint.contains("call `read_board`"));
+        assert!(checkpoint.contains("drawing may be absent"));
+        assert!(checkpoint.contains("I drew a map and a scan arrow"));
+        for forbidden in [
+            "PRIVATE_EDITOR_FIXTURE",
+            "PRIVATE_TEST_FIXTURE",
+            "read_editor",
+            "UNTRUSTED TEST REPORT",
+            "Current editor",
+            "Code execution is disabled",
+            "run tests",
+        ] {
+            assert!(
+                !checkpoint.contains(forbidden),
+                "unexpected {forbidden}: {checkpoint}"
+            );
+        }
+        state.behavioral_round_started = true;
+        state
+            .transcript
+            .push("Interviewer: Tell me about a difficult bug.".into());
+        let behavioral = compressed_context(&state);
+        assert!(behavioral.contains("behavioral round is active"));
+        assert!(behavioral.contains("do not return to the whiteboard round"));
+        for forbidden in [
+            "read_board",
+            "read_editor",
+            "PRIVATE_EDITOR_FIXTURE",
+            "PRIVATE_TEST_FIXTURE",
+            "UNTRUSTED TEST REPORT",
+        ] {
+            assert!(
+                !behavioral.contains(forbidden),
+                "unexpected {forbidden}: {behavioral}"
+            );
+        }
+    }
+}
+
+#[test]
+fn coding_checkpoint_keeps_existing_editor_test_and_disabled_execution_paths() {
+    let state = RuntimeState {
+        language: "javascript".into(),
+        language_chosen: true,
+        code: "function fixture() { return []; }".into(),
+        last_test_run: Some(json!({"setupError":"TEST_RECORD_FIXTURE"})),
+        ..RuntimeState::default()
+    };
+    let normal = compressed_context(&state);
+    assert!(normal.contains(&state.code));
+    assert!(normal.contains("TEST_RECORD_FIXTURE"));
+    assert!(normal.contains("UNTRUSTED TEST REPORT"));
+    assert!(!normal.contains("read_board"));
+    let disabled = compressed_context(&RuntimeState {
+        code_execution_disabled: true,
+        ..state
+    });
+    assert!(disabled.contains("Code execution is disabled"));
+    assert!(!disabled.contains("read_board"));
+}
+
+#[test]
+fn whiteboard_mode_wording_excludes_shared_implementation_expectations() {
+    let problem = get_problem(Some("two-sum"));
+    for interview_loop in [InterviewLoop::CodingOnly, InterviewLoop::CodingBehavioral] {
+        for examples_hidden in [false, true] {
+            let prompt = build_instructions_for_plan(
+                problem,
+                45,
+                &codetrial::runtime::RuntimeOptions {
+                    interview_mode: InterviewMode::Whiteboard,
+                    interview_loop,
+                    examples_hidden,
+                    ..Default::default()
+                },
+            );
+            for forbidden in [
+                "finish editing",
+                "passing solution",
+                "function to",
+                "minute coding interview",
+                "all tests",
+                "tests\n  pass",
+            ] {
+                assert!(
+                    !prompt.contains(forbidden),
+                    "unexpected {forbidden}: {prompt}"
+                );
+            }
+            assert!(prompt.contains("45-minute whiteboard interview"));
+            assert!(prompt.contains("4. Coding"));
+            assert!(prompt.contains("5. Test"));
+            assert!(prompt.contains("`read_board`"));
+            assert!(prompt.contains("TIMER:"));
+            assert!(prompt.contains("`log_hint`"));
+            if interview_loop == InterviewLoop::CodingBehavioral {
+                assert!(prompt.contains("STAR behavioral reserve"));
+                assert!(prompt.contains("Test and Optimizations evidence gate passed"));
+            }
+        }
+    }
+}
+
+#[test]
+fn whiteboard_mode_wording_recovery_does_not_invent_passing_tests() {
+    let state = RuntimeState {
+        interview_mode: InterviewMode::Whiteboard,
+        interview_loop: InterviewLoop::CodingOnly,
+        ..RuntimeState::default()
+    };
+    for prompt in [
+        cold_restart(&state),
+        compressed_context(&state),
+        resumed_context(&state, false, None),
+    ] {
+        assert!(!prompt.contains("all tests pass"), "{prompt}");
+        assert!(!prompt.contains("solved and tested"), "{prompt}");
+        assert!(!prompt.contains("click Run"), "{prompt}");
+    }
+}
+
+#[test]
+fn whiteboard_mode_wording_completed_two_round_recovery_keeps_gate_and_surface() {
+    let mut state = RuntimeState {
+        interview_mode: InterviewMode::Whiteboard,
+        interview_loop: InterviewLoop::CodingBehavioral,
+        board_drawn: true,
+        ..RuntimeState::default()
+    };
+    for phase in ["test", "optimizations"] {
+        record_framework_evidence(&mut state, &json!({
+            "phase": phase, "source": "candidate_speech", "kind": "observed",
+            "confidence": 90, "summary": "Candidate traced ordinary and boundary cases and explained complexity."
+        })).unwrap();
+    }
+    for prompt in [
+        cold_restart(&state),
+        compressed_context(&state),
+        resumed_context(&state, false, None),
+    ] {
+        assert!(
+            prompt.contains("whiteboard round has its required evidence"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("solved and tested"), "{prompt}");
+        assert!(!prompt.contains("click Run"), "{prompt}");
+        assert!(prompt.contains("test, optimizations"), "{prompt}");
+    }
+}
+
+#[test]
+fn coding_flow_reviews_existing_implementation_without_restarting_it() {
+    let problem = get_problem(Some("two-sum"));
+    for disabled in [false, true] {
+        let prompt = build_instructions_for_plan(
+            problem,
+            45,
+            &codetrial::runtime::RuntimeOptions {
+                code_execution_disabled: disabled,
+                ..Default::default()
+            },
+        );
+        assert!(prompt.contains("transition in one sentence only if implementation has not begun"));
+        assert!(prompt.contains(
+            "Otherwise review the existing implementation; do not ask them to begin it again."
+        ));
+        assert!(prompt.contains("a concrete remaining change, test or explanation"));
+        assert!(prompt.contains("a conceptual flaw may return\nCoding to Algorithm, and a failed test may return Test to Coding."));
+        assert!(prompt.contains(
+            "read the lines it names before claiming an implementation or\n  technique is absent"
+        ));
+        if disabled {
+            assert!(prompt.contains("never ask them to click Run or claim that cases executed"));
+            assert!(prompt.contains("trace their written code on one ordinary case"));
+        } else {
+            assert!(prompt.contains(
+                "wait for a test\n   event with executed cases of the code now in the editor"
+            ));
+        }
+    }
+    let samples = prompt_samples();
+    let frozen: Value = serde_json::from_str(include_str!("../golden/prompts.json")).unwrap();
+    let actual = &samples["boardInstructions"];
+    assert_eq!(actual, &frozen["boardInstructions"]);
+    assert!(
+        !actual
+            .as_str()
+            .unwrap()
+            .contains("Review code already present")
+    );
+}
+
+#[test]
+fn completed_example_walkthroughs_are_not_reopened_without_a_reason() {
+    for disabled in [false, true] {
+        let prompt = build_instructions_for_plan(
+            get_problem(Some("two-sum")),
+            45,
+            &codetrial::runtime::RuntimeOptions {
+                code_execution_disabled: disabled,
+                ..Default::default()
+            },
+        );
+        assert!(prompt.contains("Do not reopen a completed Example\n   walkthrough without a relevant implementation change or a concrete unresolved concern."));
+        assert!(prompt.contains("ask for their walkthrough of an ordinary and a boundary case"));
+        assert!(prompt.contains("a conceptual flaw may return\nCoding to Algorithm, and a failed test may return Test to Coding."));
+        if disabled {
+            assert!(
+                prompt.contains(
+                    "trace their written code on one ordinary case and one boundary case"
+                )
+            );
+            assert!(prompt.contains("never ask them to click Run or claim that cases executed"));
+        } else {
+            assert!(prompt.contains("A verbal trace alone does not complete Test"));
+        }
+    }
+    let state = RuntimeState {
+        code: "function solve(a,t) { return [0,1]; }".into(),
+        transcript: vec![
+            "Candidate: For [3,3], target6, indices0and1; check before inserting.".into(),
+        ],
+        ..RuntimeState::default()
+    };
+    for text in [
+        cold_restart(&state),
+        compressed_context(&state),
+        resumed_context(&state, false, None),
+    ] {
+        assert!(text.contains("Do not repeat example walkthroughs, testing, complexity, or edge-case questions already answered"));
+        assert!(text.contains("revisit them only for a relevant implementation change or a concrete unresolved concern"));
+    }
+    let samples = prompt_samples();
+    let frozen: Value = serde_json::from_str(include_str!("../golden/prompts.json")).unwrap();
+    assert_eq!(samples["boardInstructions"], frozen["boardInstructions"]);
 }
