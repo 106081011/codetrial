@@ -515,6 +515,26 @@ test("filter options are deduplicated, ordered, and free of unreadable values", 
   assert.deepEqual(model.options.language, ["c", "python"]);
 });
 
+// The alphabet and the scale disagree only when Hard and Medium are both in
+// the history, so that pair is what pins the comparator. The test above
+// cannot: "Easy" and "Medium" sort the same either way.
+test("the difficulty menu follows the scale, not the alphabet", () => {
+  const entry = (day, difficulty) => ({
+    id: `r${day}`,
+    date: at(day),
+    problemId: "two-sum",
+    difficulty,
+    language: "python",
+    durationMin: 45,
+  });
+  const model = buildProgressModel([
+    entry(1, "Hard"),
+    entry(2, "Easy"),
+    entry(3, "Medium"),
+  ]);
+  assert.deepEqual(model.options.difficulty, ["Easy", "Medium", "Hard"]);
+});
+
 // "all" is the sentinel the menus send when nothing is selected, and it has to
 // mean "no filter" rather than being compared against as a value.
 test("the all sentinel and a missing filter both select every attempt", () => {

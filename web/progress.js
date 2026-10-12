@@ -239,7 +239,10 @@ function progressOptions(entries) {
       ),
     ].sort(compare);
   return {
-    difficulty: values("difficulty"),
+    difficulty: values(
+      "difficulty",
+      (left, right) => LEVELS.indexOf(left) - LEVELS.indexOf(right),
+    ),
     language: values("language"),
     durationMin: values("durationMin", (left, right) => left - right),
   };
