@@ -464,7 +464,7 @@ test("a loaded grammar replaces cached fallback ranges without an edit", async (
   });
   if (!ctx) return;
   const { page, errors } = ctx;
-  const code = "function f() {} /[()]/.test(value);";
+  const code = "class A {} /[()]/.test(value);";
   try {
     await page.evaluate(() => {
       document.querySelector('[data-language="javascript"]').click();
@@ -477,7 +477,7 @@ test("a loaded grammar replaces cached fallback ranges without an edit", async (
       const position = editor.value.indexOf("[()") + 1;
       editor.setSelectionRange(position, position);
     });
-    // The fallback treats the slash after a declaration as division.
+    // The fallback treats the slash after a class body as division.
     await page.locator(".matching-bracket").first().waitFor();
     releaseGrammar();
     await page.waitForFunction(
@@ -487,6 +487,86 @@ test("a loaded grammar replaces cached fallback ranges without an edit", async (
     assert.deepEqual(errors, []);
   } finally {
     releaseGrammar();
+    await page.close();
+  }
+});
+
+test("a parse cut off by its time budget is retried without an edit", async (t) => {
+  const ctx = await editorPage(t, {
+    beforeLoad: async (page) => {
+      await page.route("**/syntax-parser.js", async (route) => {
+        const response = await route.fetch();
+        const source = await response.text();
+        const guard = "    if (!parser) return null;\n";
+        assert.ok(source.includes(guard));
+        await route.fulfill({
+          response,
+          // Stand in for an overrun: the next parse returns no tree.
+          body: source.replace(
+            guard,
+            guard +
+              "    if (globalThis.cutParses > 0) {\n" +
+              "      globalThis.cutParses -= 1;\n" +
+              "      return null;\n" +
+              "    }\n",
+          ),
+        });
+      });
+    },
+  });
+  if (!ctx) return;
+  const { page, errors } = ctx;
+  try {
+    await page.evaluate(async () => {
+      document.querySelector('[data-language="javascript"]').click();
+      await (await import("/syntax-parser.js")).prepareLanguage("javascript");
+      document.querySelector("#editor").focus();
+    });
+    // The scanner alone reads this regexp as division after a class body.
+    const code = "class A {} /[()]/.test(value);";
+    await page.evaluate(() => {
+      window.cutParses = 1;
+    });
+    await setCode(page, code, code.indexOf("[()") + 1);
+    await page.waitForFunction(
+      () =>
+        window.cutParses === 0 &&
+        document.querySelectorAll(".matching-bracket").length === 0,
+    );
+    assert.equal((await caretState(page)).value, code);
+
+    // An edit before the retry's frame abandons that retry, so cutting the
+    // same buffer off again later still earns it one.
+    const other = "class B {} /[()]/.test(other);";
+    await page.evaluate(async (other) => {
+      const editor = document.querySelector("#editor");
+      const type = (value) => {
+        editor.value = value;
+        editor.setSelectionRange(
+          other.indexOf("[()") + 1,
+          other.indexOf("[()") + 1,
+        );
+        editor.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      window.cutParses = 1;
+      type(other);
+      // The paint cuts this parse off and queues its retry for the next frame.
+      await new Promise(requestAnimationFrame);
+      type("x");
+      await new Promise(requestAnimationFrame);
+      window.cutParses = 1;
+      type(other);
+    }, other);
+    await page.waitForFunction(
+      (other) =>
+        window.cutParses === 0 &&
+        document.querySelector("#editor-highlight code").textContent ===
+          other &&
+        document.querySelectorAll(".matching-bracket").length === 0,
+      other,
+    );
+    assert.deepEqual(errors, []);
+  } finally {
     await page.close();
   }
 });
@@ -552,9 +632,18 @@ test("disabled auto indentation retains parsed bracket highlighting", async (t) 
       tree?.delete();
       return tree !== null;
     });
-    const code = "function f() {} /[()]/.test(value);";
+    // The scanner alone reads this regexp as division after a class body.
+    const code = "class A {} /[()]/.test(value);";
     const caret = code.indexOf("[()") + 1;
     await setCode(page, code, caret);
+    // A cold runtime can overrun the parse budget on its first real buffer,
+    // which paints the scanner's marks until the retry on the next frame.
+    await page.waitForFunction(
+      (code) =>
+        document.querySelector("#editor-highlight code").textContent === code &&
+        document.querySelectorAll(".matching-bracket").length === 0,
+      code,
+    );
     assert.equal(await page.locator(".matching-bracket").count(), 0);
     assert.deepEqual(await caretState(page), {
       value: code,

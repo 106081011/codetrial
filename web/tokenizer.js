@@ -324,8 +324,8 @@ function codePointAt(code, index) {
   return String.fromCodePoint(code.codePointAt(index));
 }
 
-// Infer whether / starts a regexp from preceding code. This is a heuristic;
-// function and class declaration bodies are not fully tracked.
+// Infer whether / starts a regexp from preceding code. This is a heuristic:
+// a function's body counts as a block, but class bodies are not tracked.
 function scanJavaScriptCode(scan) {
   const { code, index, js } = scan;
   const char = code[index];
@@ -338,6 +338,9 @@ function scanJavaScriptCode(scan) {
       at += next.length;
     }
     const word = code.slice(index, at);
+    // function, then an optional name, then the parameters.
+    if (!js.propertyName && word === "function") js.functionHead = "keyword";
+    else js.functionHead = js.functionHead === "keyword" ? "name" : null;
     // In obj.return / 2, return is a property name, not a keyword.
     js.controlParen = !js.propertyName && CONTROL_PARENS.has(word);
     js.blockNext = !js.propertyName && BLOCK_KEYWORDS.has(word);
@@ -351,24 +354,32 @@ function scanJavaScriptCode(scan) {
     js.expectRegexp = false;
     js.controlParen = false;
     js.propertyName = false;
+    js.functionHead = null;
     return { end: at, kind: "code" };
   }
   if ((char === "+" || char === "-") && code[index + 1] === char) {
     js.controlParen = false;
+    js.functionHead = null;
     js.propertyName = false;
     return { end: index + 2, kind: "code" };
   }
   if (/\s/.test(char)) return { end: index + 1, kind: "code" };
   const blockNext = js.blockNext;
+  const functionHead = js.functionHead;
   js.blockNext = false;
+  // function* keeps waiting for its name and parameters.
+  js.functionHead =
+    char === "*" && functionHead === "keyword" ? "keyword" : null;
   // if (...) may precede a regexp statement; / after call(...) is division.
   if (char === "(") {
-    js.parens.push(js.controlParen);
+    js.parens.push(functionHead ? "function" : js.controlParen);
     js.expectRegexp = true;
   } else if (char === ")") {
-    const control = js.parens.pop() === true;
-    js.expectRegexp = control;
-    js.blockNext = control;
+    // true after a control keyword, "function" for parameters; both are
+    // followed by a block.
+    const opener = js.parens.pop();
+    js.expectRegexp = opener === true;
+    js.blockNext = Boolean(opener);
   } else if (char === "{") {
     const kind = blockNext ? "block" : "object";
     js.braces.push(kind);
@@ -434,6 +445,9 @@ function scanFallback(code, language, syntax = null) {
             propertyName: false,
             // True after if (...), else, or =>; { then opens a block, not an object.
             blockNext: false,
+            // "keyword" after function, "name" after its name; ( then opens
+            // the parameters, whose ) is followed by a block.
+            functionHead: null,
             parens: [],
             braces: [],
           }

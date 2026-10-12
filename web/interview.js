@@ -10,7 +10,7 @@ import {
 } from "./audio-check.js";
 import { highlight } from "./highlight.js";
 import { indentGuides } from "./indent-guides.js";
-import { prepareLanguage } from "./syntax-parser.js";
+import { parseSyntax, prepareLanguage } from "./syntax-parser.js";
 import { tokenize } from "./tokenizer.js";
 import { editorOptionsFromParams } from "./editor-options.js";
 import { attachSplitter } from "./splitter.js";
@@ -190,6 +190,14 @@ let paintedLineCount = 0;
 let paintedEditor = null;
 // Keep only the current buffer's ranges; caret-only repaints need no parse.
 let editorTokenCache = null;
+// Languages whose grammar has loaded, so a parse that returns nothing ran out
+// of time rather than had no grammar to run.
+const loadedGrammars = new Set();
+// The buffer whose cut-off parse was already retried, so it is retried once.
+let editorParseRetry = null;
+// Set when a retry overran too, so further edits to a buffer too large for the
+// budget do not each pay for a second parse; cleared by a parse that finishes.
+let editorParseSlow = false;
 let editorPaintFrame = null;
 // The agent reads the editor once per 2s watch tick, so publishing every
 // keystroke sends ~10x more full-buffer packets than anyone consumes.
@@ -2056,6 +2064,7 @@ function setLanguage(language) {
   if (editorOptions.autoIndent || editorOptions.highlight) {
     void prepareLanguage(language)
       .then(() => {
+        loadedGrammars.add(language);
         if (state.language !== language) return;
         // Replace fallback ranges when the grammar finishes loading.
         editorTokenCache = null;
@@ -3332,7 +3341,41 @@ function editorTokens(code, language) {
     editorTokenCache?.code !== code ||
     editorTokenCache?.language !== language
   ) {
-    editorTokenCache = { code, language, ...tokenize(code, language) };
+    let cutOff = false;
+    let parsed = false;
+    const parse = (source, grammar) => {
+      const tree = parseSyntax(source, grammar);
+      parsed = tree !== null;
+      cutOff = !parsed && loadedGrammars.has(grammar);
+      return tree;
+    };
+    editorTokenCache = { code, language, ...tokenize(code, language, parse) };
+    const retried =
+      editorParseRetry?.code === code && editorParseRetry.language === language;
+    if (parsed) editorParseSlow = false;
+    else if (cutOff && retried) editorParseSlow = true;
+    // A parse past its time budget leaves the scanner's ranges, which misread
+    // what only the grammar can tell apart. Parse this buffer once more on the
+    // next frame rather than keep them until the next edit; a buffer that
+    // overruns again keeps them, and later edits skip the retry until a parse
+    // finishes, so a slow buffer costs one retry, not one per keystroke.
+    if (cutOff && !retried && !editorParseSlow) {
+      requestAnimationFrame(() => {
+        // An edit or a switch since then parses on its own; a retry spent
+        // here would make that buffer's own cut-off look already retried.
+        if (
+          editorTokenCache?.code !== code ||
+          editorTokenCache.language !== language ||
+          state.language !== language ||
+          currentCode() !== code
+        )
+          return;
+        editorParseRetry = { code, language };
+        editorTokenCache = null;
+        paintedEditor = null;
+        paintEditor();
+      });
+    }
   }
   return editorTokenCache;
 }
