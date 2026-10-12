@@ -464,7 +464,7 @@ test("a loaded grammar replaces cached fallback ranges without an edit", async (
   });
   if (!ctx) return;
   const { page, errors } = ctx;
-  const code = "function f() {} /[()]/.test(value);";
+  const code = "class A {} /[()]/.test(value);";
   try {
     await page.evaluate(() => {
       document.querySelector('[data-language="javascript"]').click();
@@ -477,7 +477,7 @@ test("a loaded grammar replaces cached fallback ranges without an edit", async (
       const position = editor.value.indexOf("[()") + 1;
       editor.setSelectionRange(position, position);
     });
-    // The fallback treats the slash after a declaration as division.
+    // The fallback treats the slash after a class body as division.
     await page.locator(".matching-bracket").first().waitFor();
     releaseGrammar();
     await page.waitForFunction(

@@ -18,8 +18,8 @@ before(async () => {
   );
 });
 
-const parts = (code, language) => {
-  const { tokens, endContext } = tokenize(code, language, syntax.parseSyntax);
+const parts = (code, language, parse = syntax.parseSyntax) => {
+  const { tokens, endContext } = tokenize(code, language, parse);
   assert.equal(tokens[0]?.start ?? 0, 0);
   assert.equal(tokens.at(-1)?.end ?? 0, code.length);
   for (let index = 1; index < tokens.length; index += 1) {
@@ -167,6 +167,30 @@ test("JavaScript regex literals do not turn their contents into comments", () =>
       ([kind]) => kind === "code",
     ),
   );
+});
+
+test("without a parse, a function body is a block before a regexp", () => {
+  // Before the grammar loads, or past the parse budget, the scanner decides.
+  const unparsed = (code) => parts(code, "javascript", () => null).parts;
+  for (const code of [
+    "function f() {} /[()]/.test(value);",
+    "function* f(a, b) {} /[()]/.test(value);",
+    "async function g() {} /[()]/.test(value);",
+  ])
+    assert.ok(
+      unparsed(code).some(
+        ([kind, text]) => kind === "regexp" && text === "/[()]/",
+      ),
+      code,
+    );
+  for (const code of [
+    "const n = call(a) / 2;",
+    "const n = object.function(a) / 2;",
+  ])
+    assert.ok(
+      unparsed(code).every(([kind]) => kind === "code"),
+      code,
+    );
 });
 
 test("property names and Unicode identifiers do not turn division into a regexp", () => {

@@ -128,7 +128,7 @@ test("an interview loads only selected grammars and Enter works during a switch"
     assert.equal((await snapshot()).value, python);
     await select("javascript");
     assert.equal((await snapshot()).value, expected);
-    const parsedCode = "function f() {}\n/\\/*/.test(text);\n    if (ready) {";
+    const parsedCode = "class A {}\n/\\/*/.test(text);\n    if (ready) {";
     await setCode(parsedCode);
     assert.equal(
       await page.locator("#editor-highlight .tok-string").count(),
