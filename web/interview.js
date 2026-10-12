@@ -3360,13 +3360,17 @@ function editorTokens(code, language) {
     // overruns again keeps them, and later edits skip the retry until a parse
     // finishes, so a slow buffer costs one retry, not one per keystroke.
     if (cutOff && !retried && !editorParseSlow) {
-      editorParseRetry = { code, language };
       requestAnimationFrame(() => {
+        // An edit or a switch since then parses on its own; a retry spent
+        // here would make that buffer's own cut-off look already retried.
         if (
           editorTokenCache?.code !== code ||
-          editorTokenCache.language !== language
+          editorTokenCache.language !== language ||
+          state.language !== language ||
+          currentCode() !== code
         )
           return;
+        editorParseRetry = { code, language };
         editorTokenCache = null;
         paintedEditor = null;
         paintEditor();

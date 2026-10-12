@@ -534,6 +534,37 @@ test("a parse cut off by its time budget is retried without an edit", async (t) 
         document.querySelectorAll(".matching-bracket").length === 0,
     );
     assert.equal((await caretState(page)).value, code);
+
+    // An edit before the retry's frame abandons that retry, so cutting the
+    // same buffer off again later still earns it one.
+    const other = "class B {} /[()]/.test(other);";
+    await page.evaluate(async (other) => {
+      const editor = document.querySelector("#editor");
+      const type = (value) => {
+        editor.value = value;
+        editor.setSelectionRange(
+          other.indexOf("[()") + 1,
+          other.indexOf("[()") + 1,
+        );
+        editor.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      window.cutParses = 1;
+      type(other);
+      // The paint cuts this parse off and queues its retry for the next frame.
+      await new Promise(requestAnimationFrame);
+      type("x");
+      await new Promise(requestAnimationFrame);
+      window.cutParses = 1;
+      type(other);
+    }, other);
+    await page.waitForFunction(
+      (other) =>
+        window.cutParses === 0 &&
+        document.querySelector("#editor-highlight code").textContent ===
+          other &&
+        document.querySelectorAll(".matching-bracket").length === 0,
+      other,
+    );
     assert.deepEqual(errors, []);
   } finally {
     await page.close();
