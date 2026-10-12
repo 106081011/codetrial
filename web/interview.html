@@ -11,7 +11,7 @@
   </head>
   <body>
     <main class="interview-shell">
-      <aside class="interview-sidebar">
+      <aside id="interview-sidebar" class="interview-sidebar">
         <header class="interview-header">
           <div class="brand">CODETRIAL</div>
           <h1 id="problem-title">Loading interview...</h1>
@@ -153,6 +153,20 @@
           </div>
         </section>
       </aside>
+
+      <!-- Between the sidebar and whichever panel is beside it, the editor or
+           the whiteboard. A separator that takes focus is a widget, so
+           splitter.js keeps its aria-value attributes; the stylesheet hides it
+           where the page is a single column and there is no width to trade. -->
+      <div
+        id="sidebar-resizer"
+        class="splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-controls="interview-sidebar"
+        tabindex="0"
+      ></div>
 
       <section class="editor-panel">
         <div class="editor-toolbar">

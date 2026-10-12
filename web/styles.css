@@ -707,6 +707,21 @@ p {
   }
 }
 
+/* The same retreat for a panel the candidate made narrow. The breakpoint
+   above knows the window and not the sidebar, which can now take half of it,
+   so interview.js marks the stage once the panel under it is narrower than
+   that breakpoint ever left it. */
+.jim-stage.compact .jim-avatar,
+.jim-stage.compact .hide-avatar {
+  display: none;
+}
+
+.jim-stage.compact {
+  top: auto;
+  bottom: 1.5rem;
+  width: 260px;
+}
+
 .jim-avatar-canvas {
   display: block;
   width: 100%;
@@ -1378,10 +1393,54 @@ table.phase-scores {
   }
 }
 
+/* A divider the candidate drags, or moves with the arrow keys, to trade room
+   between two panels. Shown only where a layout gives it a track; it is as
+   wide as the gap it replaces so a finger can land on it, and draws a thin
+   line only once it is pointed at or focused. The line is a background, not
+   a pseudo-element: it needs no `content`, and the focus ring it stands in
+   for would be a 1rem box around an empty strip. */
+.splitter {
+  display: none;
+  background-position: center;
+  background-repeat: no-repeat;
+  touch-action: none;
+}
+
+.splitter[aria-orientation="vertical"] {
+  background-size: 2px 100%;
+  cursor: col-resize;
+}
+
+.splitter:hover,
+.splitter:focus-visible {
+  outline: none;
+  background-image: linear-gradient(var(--accent), var(--accent));
+}
+
+/* Forced colors drop a gradient, which would leave a focused divider with
+   nothing to show where it is, so there it takes the ring it gave up. */
+@media (forced-colors: active) {
+  .splitter:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
 @media (min-width: 1024px) {
+  /* The middle track is the divider, standing where the column gap was.
+     --sidebar-width is the candidate's own width, set by interview.js; until
+     there is one the sidebar keeps the range it always had. */
   .interview-shell {
     height: 100vh;
-    grid-template-columns: minmax(17.5rem, 22.5rem) minmax(0, 1fr);
+    column-gap: 0;
+    grid-template-columns:
+      var(--sidebar-width, minmax(17.5rem, 22.5rem))
+      1rem
+      minmax(0, 1fr);
+  }
+
+  .splitter {
+    display: block;
   }
 
   .sync-state {
