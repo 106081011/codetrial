@@ -1441,7 +1441,7 @@ table.phase-scores {
   cursor: pointer;
 }
 
-.board-color.selected {
+.board-color[aria-pressed="true"] {
   box-shadow: 0 0 0 2px var(--accent);
 }
 

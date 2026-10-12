@@ -290,7 +290,7 @@ const board = {
   model: null,
   pointers: createPointerGate(),
   context: null,
-  color: PEN_COLORS[0],
+  color: PEN_COLORS[0].color,
   tool: "pen",
   eraserWidth: ERASER_WIDTH,
   /// Whether the board takes edits yet; see `boardLocked`.
@@ -3480,14 +3480,14 @@ function initWhiteboard() {
   nodes.boardPanel.hidden = false;
   board.model = createBoard();
   board.context = nodes.board.getContext("2d");
-  for (const color of PEN_COLORS) {
+  for (const { color, name } of PEN_COLORS) {
     const swatch = document.createElement("button");
     swatch.type = "button";
-    swatch.className =
-      color === board.color ? "board-color selected" : "board-color";
+    swatch.className = "board-color";
     swatch.style.background = color;
     swatch.dataset.color = color;
-    swatch.setAttribute("aria-label", `Pen ${color}`);
+    swatch.setAttribute("aria-label", `${name} pen`);
+    swatch.title = swatch.getAttribute("aria-label");
     swatch.addEventListener("click", () => selectPen(color));
     nodes.boardPens.append(swatch);
   }
@@ -3608,9 +3608,9 @@ function selectEraserWidth(width) {
 function paintToolState() {
   const erasing = board.tool === "eraser";
   for (const swatch of nodes.boardPens.children) {
-    swatch.classList.toggle(
-      "selected",
-      !erasing && swatch.dataset.color === board.color,
+    swatch.setAttribute(
+      "aria-pressed",
+      String(!erasing && swatch.dataset.color === board.color),
     );
   }
   nodes.boardEraser.setAttribute("aria-pressed", String(erasing));
