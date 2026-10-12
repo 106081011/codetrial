@@ -13,6 +13,7 @@ import {
 } from "./problem-picker.js";
 import {
   normalizeProgressEntries,
+  phaseChartData,
   pickerEntry,
   progressModelFrom,
 } from "./progress.js";
@@ -317,6 +318,7 @@ nodes.groundingClear.addEventListener("click", clearGrounding);
 
 let progressNormalized = [];
 let progressSuffix = "saved";
+const selectedProgressPhases = new Map();
 /// Whether the history on screen came from an account: null until /api/session
 /// answers, and never assumed false, because a browser that cannot ask is not a
 /// browser that knows there is nothing on the server.
@@ -1400,6 +1402,331 @@ function weaknessList(tags) {
   return list;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgElement(name, attributes = {}) {
+  const element = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attributes)) {
+    element.setAttribute(key, String(value));
+  }
+  return element;
+}
+
+function renderEmptyFrameworkTable(framework) {
+  const table = document.createElement("table");
+  const caption = document.createElement("caption");
+  caption.textContent = `${framework.name} · ${framework.scenario}`;
+  table.append(caption);
+  const head = table.createTHead().insertRow();
+  for (const label of ["Step", "Assessed scores by rubric version"]) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = label;
+    head.append(cell);
+  }
+  const body = table.createTBody();
+  for (const step of framework.steps) {
+    const row = body.insertRow();
+    const heading = document.createElement("th");
+    heading.scope = "row";
+    heading.textContent = step.label;
+    row.append(heading);
+    const trend = row.insertCell();
+    trend.textContent = "Not assessed in these attempts";
+  }
+  return table;
+}
+
+function renderPhaseChart(
+  target,
+  detailsTarget,
+  attempts,
+  series,
+  framework,
+  phase,
+) {
+  const frameworkPhases = framework.steps.map((step) => step.label);
+  const { points } = phaseChartData(attempts, phase, frameworkPhases);
+  target.replaceChildren();
+  detailsTarget.replaceChildren();
+
+  const width = Math.max(720, 120 + points.length * 48);
+  const height = 300;
+  const margin = { top: 24, right: 18, bottom: 48, left: 48 };
+  const chartWidth = width - margin.left - margin.right;
+  const chartHeight = height - margin.top - margin.bottom;
+  const x = (attemptIndex) =>
+    margin.left +
+    (points.length <= 1
+      ? chartWidth / 2
+      : (attemptIndex / (points.length - 1)) * chartWidth);
+  const y = (score) => margin.top + ((100 - score) / 100) * chartHeight;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "progress-chart-wrap";
+  wrapper.style.width = `${width}px`;
+  wrapper.tabIndex = 0;
+  wrapper.setAttribute("role", "img");
+  wrapper.setAttribute(
+    "aria-label",
+    `${phase} assessed score trend by attempt`,
+  );
+
+  const description = document.createElement("p");
+  description.className = "visually-hidden";
+  description.id = `progress-chart-description-${framework.name}-${phase}`
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-");
+  const descriptions = points
+    .filter((point) => point.frameworkAssessed)
+    .map((point) => {
+      const scoreText =
+        point.score === null ? "Not assessed" : String(point.score);
+      const rubricText =
+        point.rubricVersion === null ? "" : `, Rubric v${point.rubricVersion}`;
+      return `Attempt ${point.attemptIndex + 1}: ${scoreText}${rubricText}.`;
+    });
+  description.textContent = descriptions.join(" ");
+  wrapper.setAttribute("aria-describedby", description.id);
+
+  const svg = svgElement("svg", {
+    class: "progress-chart",
+    viewBox: `0 0 ${width} ${height}`,
+    "aria-hidden": "true",
+    focusable: "false",
+  });
+  const tooltip = document.createElement("div");
+  tooltip.className = "progress-chart-tooltip";
+  tooltip.hidden = true;
+
+  const showTooltip = (point, cx, cy) => {
+    const primary = document.createElement("div");
+    primary.textContent =
+      point.score === null
+        ? `Attempt ${point.attemptIndex + 1}: Not assessed`
+        : `Attempt ${point.attemptIndex + 1}: ${point.score}`;
+    const detail = document.createElement("div");
+    detail.className = "progress-chart-tooltip-version";
+    detail.textContent =
+      point.rubricVersion === null ? "" : `Rubric v${point.rubricVersion}`;
+    tooltip.replaceChildren(primary, detail);
+    tooltip.style.top = `${(cy / height) * 100}%`;
+    tooltip.classList.toggle("below", cy <= margin.top + 32);
+    tooltip.hidden = false;
+
+    const halfWidth = tooltip.offsetWidth / 2;
+    const edgePadding = 4;
+    const chartLeft = halfWidth + edgePadding;
+    const chartRight = width - halfWidth - edgePadding;
+    const visibleLeft = Math.max(
+      chartLeft,
+      target.scrollLeft + halfWidth + edgePadding,
+    );
+    const visibleRight = Math.min(
+      chartRight,
+      target.scrollLeft + target.clientWidth - halfWidth - edgePadding,
+    );
+    const tooltipCenter =
+      visibleLeft <= visibleRight
+        ? Math.min(visibleRight, Math.max(visibleLeft, cx))
+        : Math.min(chartRight, Math.max(chartLeft, cx));
+    tooltip.style.left = `${tooltipCenter}px`;
+  };
+  const hideTooltip = () => {
+    tooltip.hidden = true;
+  };
+
+  for (const score of [100, 75, 50, 25, 0]) {
+    const cy = y(score);
+    svg.append(
+      svgElement("line", {
+        class: "progress-chart-grid",
+        x1: margin.left,
+        x2: width - margin.right,
+        y1: cy,
+        y2: cy,
+      }),
+    );
+    const label = svgElement("text", {
+      class: "progress-chart-axis-label",
+      x: margin.left - 10,
+      y: cy + 4,
+      "text-anchor": "end",
+    });
+    label.textContent = score;
+    svg.append(label);
+  }
+
+  for (const segment of series) {
+    if (segment.points.length > 1) {
+      svg.append(
+        svgElement("polyline", {
+          class: "progress-chart-line",
+          points: segment.points
+            .map((point) => `${x(point.attemptIndex)},${y(point.score)}`)
+            .join(" "),
+        }),
+      );
+    }
+  }
+
+  for (const point of points) {
+    if (point.frameworkAssessed) {
+      const cx = x(point.attemptIndex);
+      const plottedScore = point.score ?? 0;
+      const cy = y(plottedScore);
+      const marker = svgElement("circle", {
+        class:
+          point.score === null
+            ? "progress-chart-point progress-chart-point-missing"
+            : "progress-chart-point",
+        cx,
+        cy,
+        r: point.score === null ? 5 : 5.5,
+      });
+      marker.addEventListener("mouseenter", () => showTooltip(point, cx, cy));
+      marker.addEventListener("mouseleave", hideTooltip);
+      marker.addEventListener("click", () => showTooltip(point, cx, cy));
+      svg.append(marker);
+    }
+
+    const labelEvery = Math.max(1, Math.ceil(points.length / 16));
+    if (
+      point.attemptIndex % labelEvery === 0 ||
+      point.attemptIndex === points.length - 1
+    ) {
+      const attemptLabel = svgElement("text", {
+        class: "progress-chart-axis-label",
+        x: x(point.attemptIndex),
+        y: height - 24,
+        "text-anchor": "middle",
+      });
+      attemptLabel.textContent = point.attemptIndex + 1;
+      svg.append(attemptLabel);
+    }
+  }
+
+  const xTitle = svgElement("text", {
+    class: "progress-chart-axis-title",
+    x: margin.left + chartWidth / 2,
+    y: height - 4,
+    "text-anchor": "middle",
+  });
+  xTitle.textContent = "Attempt";
+  svg.append(xTitle);
+
+  const scoreDetails = document.createElement("details");
+  scoreDetails.className = "progress-chart-details";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.textContent = "Score details";
+  const detailsList = document.createElement("ul");
+  for (const point of points) {
+    if (!point.frameworkAssessed) continue;
+
+    const item = document.createElement("li");
+    const scoreText =
+      point.score === null ? "Not assessed" : String(point.score);
+    const rubricText =
+      point.rubricVersion === null ? "" : `, Rubric v${point.rubricVersion}`;
+    item.textContent = `Attempt ${point.attemptIndex + 1}: ${scoreText}${rubricText}`;
+    detailsList.append(item);
+  }
+  scoreDetails.append(detailsSummary, detailsList);
+
+  wrapper.append(svg, tooltip);
+  target.append(wrapper);
+  detailsTarget.append(description, scoreDetails);
+}
+
+function renderFrameworkChart(framework, model) {
+  const hasScores = framework.steps.some(
+    (step) => model.series[step.label].length > 0,
+  );
+  if (!hasScores) return renderEmptyFrameworkTable(framework);
+
+  const table = document.createElement("table");
+  table.className = "progress-chart-table";
+  const caption = document.createElement("caption");
+  caption.textContent = `${framework.name} · ${framework.scenario}`;
+  table.append(caption);
+  const head = table.createTHead().insertRow();
+  for (const label of ["Step", "Assessed score trend"]) {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = label;
+    head.append(cell);
+  }
+  const row = table.createTBody().insertRow();
+  const selectorCell = row.insertCell();
+  selectorCell.className = "progress-phase-selector";
+  const chartCell = row.insertCell();
+  chartCell.className = "progress-chart-cell";
+  const chartScroll = document.createElement("div");
+  chartScroll.className = "progress-chart-scroll";
+  const detailsTarget = document.createElement("div");
+  detailsTarget.className = "progress-chart-details-wrap";
+  chartCell.append(chartScroll, detailsTarget);
+
+  const keptLabel = selectedProgressPhases.get(framework.name);
+  let selected =
+    framework.steps.find(
+      (step) => step.label === keptLabel && model.series[step.label].length > 0,
+    ) ?? framework.steps.find((step) => model.series[step.label].length > 0);
+  const buttons = new Map();
+  let chartRendered = false;
+  let initialScrollFrame = null;
+  const select = (step) => {
+    const previousScrollLeft = chartScroll.scrollLeft;
+    const preserveScroll = chartRendered;
+    if (preserveScroll && initialScrollFrame !== null) {
+      cancelAnimationFrame(initialScrollFrame);
+      initialScrollFrame = null;
+    }
+
+    selected = step;
+    selectedProgressPhases.set(framework.name, step.label);
+    for (const [candidate, button] of buttons) {
+      const active = candidate === selected;
+      button.classList.toggle("selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    renderPhaseChart(
+      chartScroll,
+      detailsTarget,
+      model.attempts,
+      model.series[selected.label],
+      framework,
+      selected.label,
+    );
+
+    if (preserveScroll) {
+      const maxScrollLeft = Math.max(
+        0,
+        chartScroll.scrollWidth - chartScroll.clientWidth,
+      );
+      chartScroll.scrollLeft = Math.min(previousScrollLeft, maxScrollLeft);
+    }
+    chartRendered = true;
+  };
+
+  for (const step of framework.steps) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "progress-phase-button";
+    button.textContent = step.label;
+    button.setAttribute("aria-pressed", "false");
+    button.addEventListener("click", () => select(step));
+    buttons.set(step, button);
+    selectorCell.append(button);
+  }
+  select(selected);
+  initialScrollFrame = requestAnimationFrame(() => {
+    initialScrollFrame = null;
+    chartScroll.scrollLeft = chartScroll.scrollWidth;
+  });
+  return table;
+}
+
 function renderProgress() {
   const filters = {
     difficulty: nodes.progressDifficulty.value,
@@ -1424,44 +1751,13 @@ function renderProgress() {
   ).length;
   nodes.progressSummary.textContent =
     assessed === 0
-      ? `${model.attempts.length} of ${model.total} attempts shown · these legacy or unassessed reports have no versioned phase scores, so no zeroes are plotted · ${progressSuffix}.`
-      : `${model.attempts.length} of ${model.total} attempts shown · ${assessed} have comparable formative phase scores, not calibrated hiring evidence · ${progressSuffix}.`;
-  // A table each, not one table with the two as groups inside it. They score
-  // different exercises: REACTO is how a problem was worked, STAR is how past
-  // work was recounted. A single Phase column ran them together as one
-  // ten-step scale, and neither table refers to the other because a candidate
-  // reading one has no use for the other's rows.
+      ? `${model.attempts.length} of ${model.total} attempts shown · these legacy or unassessed reports have no versioned phase scores, so nothing is plotted · ${progressSuffix}.`
+      : `${model.attempts.length} of ${model.total} attempts shown · ${assessed} have comparable formative phase scores, not calibrated hiring evidence · hollow baseline markers mean not assessed, not a score of zero · ${progressSuffix}.`;
+  // Keep REACTO and STAR in separate tables: they score different exercises.
+  // Inside each table, a step selector reuses one chart so long attempt histories
+  // stay readable without turning the two frameworks into a ten-step scale.
   for (const framework of Object.values(FRAMEWORKS)) {
-    const table = document.createElement("table");
-    const caption = document.createElement("caption");
-    caption.textContent = `${framework.name} · ${framework.scenario}`;
-    table.append(caption);
-    const head = table.createTHead().insertRow();
-    for (const label of ["Step", "Assessed scores by rubric version"]) {
-      const cell = document.createElement("th");
-      cell.scope = "col";
-      cell.textContent = label;
-      head.append(cell);
-    }
-    const body = table.createTBody();
-    for (const step of framework.steps) {
-      const row = body.insertRow();
-      const heading = document.createElement("th");
-      heading.scope = "row";
-      heading.textContent = step.label;
-      row.append(heading);
-      const trend = row.insertCell();
-      const segments = model.series[step.label];
-      trend.textContent = segments.length
-        ? segments
-            .map(
-              (segment) =>
-                `Rubric v${segment.rubricVersion}: ${segment.points.map((point) => `attempt ${point.attemptIndex + 1}: ${point.score}`).join(" → ")}`,
-            )
-            .join(" | ")
-        : "Not assessed in these attempts";
-    }
-    nodes.progressTrends.append(table);
+    nodes.progressTrends.append(renderFrameworkChart(framework, model));
   }
   if (model.weaknesses.length === 0) {
     const item = document.createElement("li");
@@ -1501,7 +1797,6 @@ function renderProgress() {
     }
   }
 }
-
 function syncFilter(select, values, label) {
   const selected = select.value;
   select.replaceChildren(new Option("All", "all"));
