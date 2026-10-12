@@ -399,6 +399,14 @@ function scanPlainCode(scan) {
   return { end: scan.index + 1, kind: "code" };
 }
 
+// The marker a language's line comments open with, for callers that write a
+// comment rather than find one. Null for a language with no entry above.
+export function lineCommentFor(language) {
+  return Object.hasOwn(LANGUAGES, language)
+    ? LANGUAGES[language].lineComment
+    : null;
+}
+
 function scanFallback(code, language, syntax = null) {
   if (!Object.hasOwn(LANGUAGES, language))
     throw new RangeError("Unsupported language: " + language);

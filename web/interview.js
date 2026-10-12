@@ -34,6 +34,8 @@ import {
   isBackspaceKeystroke,
   deleteEmptyPair,
   matchingBrackets,
+  isToggleCommentKeystroke,
+  toggleLineComment,
 } from "./editor.js";
 import { createDevicePool } from "./devices.js";
 import { createFaceCheck } from "./face-check.js";
@@ -856,6 +858,20 @@ function bindEvents() {
     if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
     const indents = event.key === "Tab" && !tabLeavesEditor;
     tabLeavesEditor = false;
+    if (isToggleCommentKeystroke(event)) {
+      const toggled = toggleLineComment(
+        nodes.editor.value,
+        nodes.editor.selectionStart,
+        nodes.editor.selectionEnd,
+        state.language,
+      );
+      if (!toggled) return;
+      event.preventDefault();
+      // A held chord repeats. Each repeat would flip the block back, and leave
+      // an undo step of its own behind.
+      if (!event.repeat) applyEditorEdit(toggled);
+      return;
+    }
     if (!indents) return;
     event.preventDefault();
     applyEditorEdit(

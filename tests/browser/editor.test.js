@@ -12,6 +12,8 @@ import {
   typeOverCloser,
   isBackspaceKeystroke,
   deleteEmptyPair,
+  isToggleCommentKeystroke,
+  toggleLineComment,
 } from "../../web/editor.js";
 import { createSyntaxParser } from "../../web/syntax-parser.js";
 import { tokenize } from "../../web/tokenizer.js";
@@ -932,4 +934,154 @@ test("parsed Python f-strings match expressions but exclude escaped braces and t
     matchingBrackets(formatted, width, width, "python", getTokens),
     [width, formatted.indexOf("}", width)],
   );
+});
+
+test("the comment toggle writes each language's own marker", () => {
+  for (const [language, marker] of [
+    ["python", "#"],
+    ["javascript", "//"],
+    ["c", "//"],
+    ["cpp", "//"],
+    ["java", "//"],
+  ]) {
+    const width = marker.length + 1;
+    assert.deepEqual(
+      toggleLineComment("x = 1", 2, 2, language),
+      { value: `${marker} x = 1`, start: 2 + width, end: 2 + width },
+      language,
+    );
+  }
+});
+
+// Null is what lets the keystroke through untouched, so an inherited property
+// name must not be read as a language that has a marker.
+test("the comment toggle leaves an unsupported language alone", () => {
+  for (const language of ["unknown", "constructor", "toString", ""])
+    assert.equal(toggleLineComment("x", 0, 0, language), null, language);
+});
+
+test("a second toggle restores the line and the caret", () => {
+  const commented = toggleLineComment("    return n", 8, 8, "python");
+  assert.deepEqual(commented, { value: "    # return n", start: 10, end: 10 });
+  assert.deepEqual(
+    toggleLineComment(
+      commented.value,
+      commented.start,
+      commented.end,
+      "python",
+    ),
+    { value: "    return n", start: 8, end: 8 },
+  );
+});
+
+// The caret cases a removal has to get right: inside the marker it collapses
+// onto where the marker began, and before it nothing moves.
+test("uncommenting keeps the caret off the removed marker", () => {
+  assert.deepEqual(toggleLineComment("  // a", 3, 3, "c"), {
+    value: "  a",
+    start: 2,
+    end: 2,
+  });
+  assert.deepEqual(toggleLineComment("  // a", 1, 1, "c"), {
+    value: "  a",
+    start: 1,
+    end: 1,
+  });
+});
+
+test("a comment typed without the space is still removed whole", () => {
+  assert.deepEqual(toggleLineComment("#x\n# y", 0, 6, "python"), {
+    value: "x\ny",
+    start: 0,
+    end: 3,
+  });
+});
+
+// One column for the block, so nested code keeps its shape under the markers,
+// and a blank line gets nothing: a marker there is trailing whitespace the
+// candidate did not type.
+test("a block is commented at its shallowest indentation", () => {
+  const value = "def f():\n    a = 1\n\n        b = 2\n";
+  const commented = toggleLineComment(value, 9, value.length - 1, "python");
+  assert.deepEqual(commented, {
+    value: "def f():\n    # a = 1\n\n    #     b = 2\n",
+    start: 9,
+    end: 37,
+  });
+  assert.deepEqual(
+    toggleLineComment(
+      commented.value,
+      commented.start,
+      commented.end,
+      "python",
+    ),
+    { value, start: 9, end: value.length - 1 },
+  );
+});
+
+// Removing the one marker here would uncomment a line the candidate had
+// commented on purpose and leave the rest as they were.
+test("a block with one commented line gains a level", () => {
+  assert.deepEqual(toggleLineComment("  // a\n  b", 0, 10, "javascript"), {
+    value: "  // // a\n  // b",
+    start: 0,
+    end: 16,
+  });
+});
+
+// `end` is exclusive, as it is for Tab: a selection dragged down to the start
+// of a line has not selected that line.
+test("a line the selection only reaches the start of is not toggled", () => {
+  assert.deepEqual(toggleLineComment("a\nb\nc", 0, 2, "cpp"), {
+    value: "// a\nb\nc",
+    start: 3,
+    end: 5,
+  });
+});
+
+// The selection covered that line's indentation and none of its text, so the
+// marker written there is not part of it either.
+test("a selection ending where a marker goes in ends before it", () => {
+  assert.deepEqual(toggleLineComment("  a\n  b", 0, 6, "c"), {
+    value: "  // a\n  // b",
+    start: 0,
+    end: 9,
+  });
+});
+
+test("a blank line is commented when it is all there is", () => {
+  assert.deepEqual(toggleLineComment("", 0, 0, "java"), {
+    value: "// ",
+    start: 3,
+    end: 3,
+  });
+  assert.deepEqual(toggleLineComment("a\n\nb", 2, 2, "python"), {
+    value: "a\n# \nb",
+    start: 4,
+    end: 4,
+  });
+});
+
+test("the comment toggle answers to Ctrl or Cmd with a typed slash", () => {
+  const press = (event) =>
+    isToggleCommentKeystroke({
+      key: "/",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      isComposing: false,
+      ...event,
+    });
+  assert.equal(press({ ctrlKey: true }), true);
+  assert.equal(press({ metaKey: true }), true);
+  // A layout that types the slash with Shift held still means the slash.
+  assert.equal(press({ ctrlKey: true, shiftKey: true }), true);
+  assert.equal(press({}), false);
+  // AltGr on Windows, which is typing a character.
+  assert.equal(press({ ctrlKey: true, altKey: true }), false);
+  assert.equal(press({ ctrlKey: true, isComposing: true }), false);
+  // The key in the US slash position on a layout where it types a hyphen:
+  // Ctrl with it is the browser's zoom.
+  assert.equal(press({ ctrlKey: true, key: "-", code: "Slash" }), false);
 });
