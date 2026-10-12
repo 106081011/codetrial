@@ -13,6 +13,7 @@ import { indentGuides } from "./indent-guides.js";
 import { prepareLanguage } from "./syntax-parser.js";
 import { tokenize } from "./tokenizer.js";
 import { editorOptionsFromParams } from "./editor-options.js";
+import { attachSplitter } from "./splitter.js";
 import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
@@ -199,6 +200,16 @@ const FRAMEWORK_HINT_MS = 12000;
 const HIDE_EXAMPLES_KEY = "codetrial:hideExamples";
 const EDITOR_FONT_SIZE_KEY = "codetrial:editorFontSize";
 const EDITOR_THEME_KEY = "codetrial:editorTheme";
+const SIDEBAR_WIDTH_KEY = "codetrial:sidebarWidth";
+// The sidebar's narrowest is the width it had before it could be resized. The
+// panel beside it keeps more than its widest toolbar item, the row of language
+// tabs, needs, so the toolbar wraps but nothing in it is cut off.
+const SIDEBAR_MIN_REM = 17.5;
+const SIDEBAR_NEIGHBOUR_MIN_REM = 30;
+// Below this the panel under Jim's stage is narrower than the stylesheet's
+// 1200px breakpoint ever left it beside the sidebar's old 22.5rem, so the
+// avatar gives way as it does below that breakpoint.
+const JIM_AVATAR_PANEL_MIN_REM = 49;
 /// In rem. A fixed ladder rather than a free number, so a stored value is
 /// either one of these or ignored, and every size the page can show is one the
 /// browser check has seen keep the three editor layers in line.
@@ -534,6 +545,8 @@ const nodes = {
   meetOutputRow: document.querySelector("#meet-output-row"),
   meetOutputSelect: document.querySelector("#meet-output-select"),
   meetOutputNote: document.querySelector("#meet-output-note"),
+  sidebar: document.querySelector("#interview-sidebar"),
+  sidebarResizer: document.querySelector("#sidebar-resizer"),
   editorPanel: document.querySelector(".editor-panel"),
   boardPanel: document.querySelector("#board-panel"),
   boardToolbar: document.querySelector(".board-toolbar"),
@@ -594,6 +607,19 @@ async function init() {
   if (whiteboard) initWhiteboard();
   placeJimStageBelowToolbar(
     whiteboard ? nodes.boardToolbar : nodes.editorToolbar,
+  );
+  // After initWhiteboard, so the bounds measure the panel that stayed.
+  attachSplitter({
+    handle: nodes.sidebarResizer,
+    pane: nodes.sidebar,
+    axis: "x",
+    target: nodes.sidebarResizer.parentElement,
+    property: "--sidebar-width",
+    storageKey: SIDEBAR_WIDTH_KEY,
+    bounds: sidebarBounds,
+  });
+  compactJimStageBesideNarrowPanel(
+    whiteboard ? nodes.boardPanel : nodes.editorPanel,
   );
   // After bindEvents, so the callback cannot beat the row it edits: everything
   // above here is synchronous, and a `then` runs no earlier than the next
@@ -3438,6 +3464,52 @@ function applyEditorTheme(stored) {
     "aria-pressed",
     String(theme === "light"),
   );
+}
+
+/// How wide the sidebar may be, in pixels, for the window as it is now: no
+/// narrower than it was before it could be resized, no wider than half the
+/// window, and never so wide that the panel beside it loses its minimum. The
+/// two panels' widths are summed rather than derived from the shell, because
+/// that sum is what the divider shares out and it does not change as it moves.
+/// Both bounds grow with the root font and the window does not, so `max` is
+/// floored at `min`: the layout already lets the minimum win, and a range
+/// announced upside down would have End save a width below it.
+function sidebarBounds() {
+  const rem = Number.parseFloat(
+    getComputedStyle(document.documentElement).fontSize,
+  );
+  const neighbour = whiteboard ? nodes.boardPanel : nodes.editorPanel;
+  const room =
+    nodes.sidebar.getBoundingClientRect().width +
+    neighbour.getBoundingClientRect().width;
+  return {
+    min: SIDEBAR_MIN_REM * rem,
+    max: Math.max(
+      SIDEBAR_MIN_REM * rem,
+      Math.min(window.innerWidth / 2, room - SIDEBAR_NEIGHBOUR_MIN_REM * rem),
+    ),
+  };
+}
+
+/// Takes the avatar off a panel too narrow to carry it, leaving the captions,
+/// as the stylesheet does for a narrow window. The window's width stopped
+/// being enough to tell once the sidebar could be widened: at 1280px the
+/// editor can be 592px with the avatar still over it. The stylesheet still
+/// owns what compact looks like, and the avatar's own width observer pauses
+/// and resumes its drawing from the result.
+function compactJimStageBesideNarrowPanel(panel) {
+  const fit = () => {
+    const rem = Number.parseFloat(
+      getComputedStyle(document.documentElement).fontSize,
+    );
+    nodes.jimStage.classList.toggle(
+      "compact",
+      panel.getBoundingClientRect().width < JIM_AVATAR_PANEL_MIN_REM * rem,
+    );
+  };
+  if (window.ResizeObserver) new window.ResizeObserver(fit).observe(panel);
+  else window.addEventListener("resize", fit);
+  fit();
 }
 
 /// Keeps Jim's stage under the toolbar the page shows: the editor's, or the
