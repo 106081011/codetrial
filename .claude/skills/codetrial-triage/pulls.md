@@ -48,8 +48,8 @@ for a confirmation only stalls a contributor:
 - Requesting a rebase on a PR in `rebase`, then hiding every review in `hide`
   as outdated. The review text is fixed in [rebase.md](rebase.md), so the
   maintainer approved it once by writing it, and `hide` holds only reviews with
-  exactly that text and no inline comments; a hidden review stays one click
-  from readable.
+  exactly that text, or the short request named below, and no inline comments;
+  a hidden review stays one click from readable.
 
 ```sh
 gh api -X POST "repos/$repo/actions/runs/$run/approve"
@@ -133,7 +133,11 @@ notification.
 
 The review body is [rebase.md](rebase.md), posted as the file itself; the
 script compares against the same file, so rewording it there keeps the two in
-step. Reviews already posted with the old wording then stop counting as
+step. The script also counts the maintainers' hand-written short request,
+exactly "Rebase latest `main` branch and resolve conflicts." with no inline
+comments, as a rebase request, since the fixed text asks for that and more: a
+PR that got one on its current head is not asked again, and an earlier one
+lands in `hide`. Reviews already posted with the old wording then stop counting as
 requests, and the next sweep asks again.
 
 The sweep is a snapshot, and an author may push between it and the post; a
