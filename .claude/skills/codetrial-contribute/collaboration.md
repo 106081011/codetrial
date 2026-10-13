@@ -32,9 +32,16 @@ post one on the user's behalf.
 
 An accepted issue usually carries a maintainer comment that confirms the
 cause on `main` at `file:line`, draws the boundary of the change, names the
-tests to add, and says to open the pull request with `Closes #N`, often adding
-that no assignment is needed (#240, #246 confirm; #159, #234 waive assignment).
-That comment is the specification: build exactly that slice.
+tests to add, and says to open the pull request with `Closes #N`. That comment
+is the specification: build exactly that slice.
+
+The maintainer also assigns the issue, without being asked, to the contributor
+whose plan it accepts, and the assignee is the record of who holds the work
+(#94, #156). Before starting, check the assignee: an issue assigned to another
+contributor is theirs unless the maintainer reassigns it, so review their PR or
+ask in the thread instead of writing a second branch. Holding an assignment
+means sending the PR; one that goes silent for a week gets a check-in with a
+date after which the issue opens to anyone (#156).
 
 Reporters are expected to investigate as engineers, not as end users: "Approach
 the task as a CS student ... rather than as an end user" (#215, #216). A
