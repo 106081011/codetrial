@@ -2,13 +2,13 @@
 name: codetrial-triage
 description: >
   Review CodeTrial issues and pull requests for duplicates, missing evidence,
-  unanswered requests, linked fixes, overlapping work and stalled review, and
-  draft the reminders, acceptances and closes that follow. Use for backlog
-  triage, checking new issues or PRs, asking what needs attention, deciding
-  whether a symptom already has an issue, and explicit PR sweeps. Default to
-  a read-only report; a PR sweep has narrowly defined actions in pulls.md.
-  Use codetrial-contribute for drafts on a contributor's behalf, new issues
-  or PRs, and focused maintainer questions.
+  unanswered requests, linked fixes, stale claims, overlapping work and stalled
+  review, and draft the reminders, acceptances and closes that follow. Use for
+  backlog triage, checking new issues or PRs, asking what needs attention,
+  deciding whether a symptom already has an issue, and explicit PR sweeps.
+  Default to a read-only report; a PR sweep has narrowly defined actions in
+  pulls.md. Use codetrial-contribute for drafts on a contributor's behalf, new
+  issues or PRs, and focused maintainer questions.
 ---
 
 # Triage CodeTrial issues and pull requests
@@ -71,8 +71,9 @@ text left in (`[please fill in ...]`, `<Describe ...>`), a heading with nothing
 under it, a category prefix in the title, a report not in English, and a Bug
 whose reporter never gave a hex revision. A flag picks a candidate and
 does not settle a verdict: a revision may sit in a screenshot, and a quoted
-transcript may be the non-English text. `unanswered`, `waiting` and `linked`
-feed "Keep filed reports moving" below. Report anything in `truncated`.
+transcript may be the non-English text. `unanswered`, `waiting`, `linked` and
+`claimed` feed "Keep filed reports moving" below. Report anything in
+`truncated`.
 
 Then one call returns every open issue with its body; raise `--limit` above the
 open count, since `gh` pages internally:
@@ -151,8 +152,9 @@ git log --merges --format='%h %cI' --ancestry-path "$fix"..main |
   tail -1
 ```
 
-Check open pull requests before recommending that anyone implement anything, and
-before calling a feature request new:
+Check open pull requests, and the issue's assignee in the sweep's `claimed`,
+before recommending that anyone implement anything, and before calling a
+feature request new:
 
 ```sh
 gh pr list --repo "$repo" --state open --limit 100 \
@@ -277,7 +279,7 @@ usually ask for a revision or a log within a day, and in most open issues that
 question is still the newest comment. #56 was closed after six silent days
 with "Lost further actions", which told the reporter nothing about what would
 have kept it open.
-The three sweep lists are the queue, and each one has a fixed next move:
+The four sweep lists are the queue, and each one has a fixed next move:
 
 - `unanswered`: no maintainer has spoken. Triage these first, oldest first,
   with the verdicts above. The longer the first answer takes, the less likely
@@ -320,6 +322,34 @@ The three sweep lists are the queue, and each one has a fixed next move:
   When a reporter closed an issue that an open PR still `Closes`, check that
   the defect still holds on `main`; if it does, propose reopening it on the
   confirmed list, so the merge records the fix (#210).
+- `claimed`: a non-maintainer assignee, which is how the maintainers record
+  who holds the work once they accept a plan
+  ([collaboration.md](../codetrial-contribute/collaboration.md#start-with-an-actionable-contribution)).
+  The outstanding fact is the PR, and the reminder rule of `waiting` applies
+  to it, with these differences:
+  - `open_prs` belongs to the PR sweep; `merged_prs` takes the `linked`
+    merged path above.
+  - `stale`: first run
+    `gh pr list --repo "$repo" --author "$login" --state all --limit 1000`,
+    since a PR that never names the issue is invisible to the sweep. A PR
+    there for this issue means the claim is alive: link it on the issue and
+    review it. Only without one, propose one check-in that asks whether the
+    PR is still coming and names a date `wait-days` out (#156).
+  - `checked_at` is any maintainer comment after the assignee's last act,
+    including an acceptance posted just after assigning; read it, and treat
+    it as the check-in only when it names a date.
+  - When that date passes in silence, propose removing the assignee, and
+    assigning whoever asked to take it over if their plan already meets the
+    scope. The issue stays open: the claim lapsed, not the report.
+  - `asked_last`: read the assignee's comment first. A question there is the
+    maintainer's move; a promise to send the PR is not (#156).
+  - A null `stale` means the history was cut: read all of it before proposing
+    anything. With `maintainers_known` false, check that the assignee is not a
+    maintainer first.
+  - A `waiting` entry marked `claimed` gets one nudge: this rule when the PR
+    is outstanding, the `waiting` rule when a fact or a retest is.
+  - Another author's PR for the issue is compared as
+    [pulls.md](pulls.md#similar-pull-requests) says.
 
 The two windows are the sweep's `wait-days` argument, 7 by default. Report each
 list's counts next to the duplicate counts, so the maintainer sees what is
@@ -359,8 +389,12 @@ What the shapes add:
   #173 for a feature.
 - Accepting a scoped request: the parts
   [collaboration.md](../codetrial-contribute/collaboration.md#start-with-an-actionable-contribution)
-  lists. A "can I work on this?" gets the same once the scope is clear, or
-  "Analyze and confirm in advance." when it is not (#182).
+  lists, plus assigning the contributor whose plan it accepts, as one
+  confirmed action. A "can I work on this?" gets the same once the scope is
+  clear, or "Analyze and confirm in advance." when it is not (#182). When the
+  issue already has an assignee, it gets the assignee's status instead: their
+  open PR to review, or the check-in under `claimed` when the claim is stale
+  (#94).
 - Reminding a reporter: one short paragraph, addressed with an @mention, that
   repeats the open question and the date it was asked, and names the deadline
   and what happens then: closing as not planned, with posting afterwards
@@ -400,9 +434,17 @@ Use only labels `gh label list` shows unless creating one was approved.
 gh issue comment "$number" --repo "$repo" --body-file "$SCRATCH/reply.md"
 gh issue edit "$number" --repo "$repo" --title "$(cat "$SCRATCH/title.txt")" \
   --add-label "<label>"
+gh issue edit "$number" --repo "$repo" --add-assignee "$login"
+gh issue edit "$number" --repo "$repo" --remove-assignee "$login"
 gh issue close "$number" --repo "$repo" --duplicate-of "$canonical"
 gh issue close "$number" --repo "$repo" --reason "not planned"  # no reply, after its comment
 ```
+
+GitHub assigns someone without write access only once they have commented on
+that issue or when they belong to the organization. A claim made on a PR or
+another thread does not count: ask them to comment on the issue first.
+Assigning says on its own that the work is theirs, so the comment that goes
+with it carries the scope, not "go ahead" or "no assignment is needed".
 
 A close for no reply posts its comment first with `--body-file`, so the reopen
 condition is on the thread even if the close fails. Before proposing one,

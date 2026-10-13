@@ -92,7 +92,8 @@ The notice goes on both PRs, each linking the other. It names what each branch
 does that the other does not, and asks the authors to read the other diff and
 reply with how theirs relates: fold into one, rebase one on the other, or keep
 both with a sentence on why. Do not pick a winner; that is the maintainer's
-call. Skip a PR whose thread already links the other.
+call. Skip a PR whose thread already links the other. When the issue both close
+is assigned, say who holds it and since when.
 
 ## Unanswered reviews
 

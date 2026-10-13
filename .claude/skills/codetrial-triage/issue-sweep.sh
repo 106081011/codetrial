@@ -6,10 +6,13 @@
 # Usage: issue-sweep.sh [repo] [wait-days] (default sysprog21/codetrial, 7)
 #
 # Prints one JSON object:
+#   maintainers_known  false when the collaborators listing failed, leaving
+#               only comment badges to tell a maintainer
 #   unanswered  issues no maintainer has commented on, oldest first
 #   waiting     issues whose newest maintainer comment is newer than anything
 #               the reporter did since, comment or body edit; overdue once it
-#               is older than wait-days. Issues a maintainer opened are left out
+#               is older than wait-days. Issues a maintainer opened are left
+#               out; claimed marks a reporter who also holds the issue
 #   linked      issues a pull request cross-referenced after the issue opened,
 #               split into merged and still open; a PR from another
 #               repository is left out, since its number means nothing here
@@ -19,8 +22,15 @@
 #               no_revision on a Bug with no hex revision from the reporter;
 #               a bare hash must mix digits and letters so a date or a word
 #               does not pass, and a pasted --version line always does
-#   truncated   issues with more than 100 comments or cross-references, whose
-#               lists above may miss what was cut
+#   claimed     per assignee who is not a maintainer: their open_prs and
+#               merged_prs that cross-referenced the issue, idle_days since
+#               their last act or a later maintainer comment (checked_at),
+#               stale past wait-days with no such PR, asked_last when theirs
+#               is the newest comment; stale is null when the history is cut,
+#               and idle_days too when none of their acts is in what was read
+#   truncated   issues with more than 100 comments or cross-references, 10
+#               assignees or 20 assignments, whose lists above may miss what
+#               was cut
 
 set -eu
 
@@ -35,6 +45,12 @@ query='query($owner: String!, $name: String!, $endCursor: String) {
       nodes {
         number title body createdAt lastEditedAt authorAssociation
         author { login } editor { login } issueType { name }
+        assignees(first: 10) { totalCount nodes { login } }
+        assigned: timelineItems(last: 20, itemTypes: [ASSIGNED_EVENT]) {
+          totalCount
+          nodes { ... on AssignedEvent { createdAt
+            assignee { ... on User { login } } } }
+        }
         comments(last: 100) {
           totalCount
           nodes { author { __typename login } authorAssociation createdAt body }
@@ -43,28 +59,48 @@ query='query($owner: String!, $name: String!, $endCursor: String) {
           totalCount
           nodes { ... on CrossReferencedEvent { createdAt
             source { ... on PullRequest { number state mergedAt
-              repository { nameWithOwner } } } } }
+              author { login } repository { nameWithOwner } } } } }
         }
       }
     }
   }
 }'
 
+# Who may push, so a maintainer who assigned themselves without commenting is
+# not taken for a contributor. Listing it needs push access; on a refusal gh
+# prints the error body to stdout, so only a successful call is read.
+if logins=$(gh api --paginate "repos/$repo/collaborators?permission=push" \
+    --jq '.[].login' 2> /dev/null); then
+    pushers=$(printf '%s\n' "$logins" | jq -Rn '[inputs | select(length > 0)]')
+else
+    pushers='[]'
+fi
+
 pages=$(gh api graphql --paginate -F owner="${repo%/*}" -F name="${repo#*/}" \
     -f query="$query")
 
-# A maintainer is whoever GitHub marks as a member, owner or collaborator; a
-# bot's comment never asks the reporter for anything. The reporter answering by
-# editing the body counts, since the bug form and maintainers both ask for that.
-printf '%s\n' "$pages" | jq -s --argjson days "$days" --arg repo "$repo" '
+# A maintainer is whoever may push or GitHub marks as a member, owner or
+# collaborator; a bot's comment never asks the reporter for anything. The
+# reporter answering by editing the body counts, since the bug form and
+# maintainers both ask for that.
+printf '%s\n' "$pages" | jq -s --argjson days "$days" --arg repo "$repo" \
+    --argjson pushers "$pushers" '
 def ts: if . == null then 0 else fromdateiso8601 end;
-def age: (now - ts) / 86400 | floor;
-def staff: IN("MEMBER", "OWNER", "COLLABORATOR");
+def days: (now - .) / 86400 | floor;
+def age: ts | days;
+def staff: (.authorAssociation | IN("MEMBER", "OWNER", "COLLABORATOR"))
+  or (.author.login | IN($pushers[]));
 def human: .author != null and .author.__typename != "Bot";
 def cjk: [scan("[\\p{Han}\\p{Hiragana}\\p{Katakana}\\p{Hangul}]")] | length;
 def latin: [scan("[A-Za-z]")] | length;
 [.[].data.repository.issues.nodes[]] as $issues |
-def maint: [.comments.nodes[] | select(human and (.authorAssociation | staff))];
+def maint: [.comments.nodes[] | select(human and staff)];
+def cut: .comments.totalCount > 100 or .timelineItems.totalCount > 100
+  or .assignees.totalCount > 10 or .assigned.totalCount > 20;
+def prs: [.timelineItems.nodes[] | select(.source.number != null
+  and .source.repository.nameWithOwner == $repo)];
+def split: {open: [.[] | select(.state == "OPEN") | .number] | unique,
+  merged: [.[] | select(.mergedAt != null) | .number] | unique};
 def mine: .author.login as $a | [.comments.nodes[]
   | select($a != null and .author.login == $a) | .createdAt | ts]
   + [if .editor.login == $a then .lastEditedAt | ts else 0 end] | max;
@@ -83,28 +119,48 @@ def gaps: (.body // "") as $b
       (select(.issueType.name == "Bug"
           and ($said | test("codetrial [0-9.]+ \\([0-9a-f]{7,40}\\)|\\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\\b") | not))
         | "no_revision") ];
+def claim: . as $i | maint as $m
+  | ($pushers + [$m[].author.login]
+      + [if staff then .author.login else empty end]) as $staff
+  | .assignees.nodes[].login as $a | select($a | IN($staff[]) | not)
+  | [$i | prs[] | select(.source.author.login == $a)] as $xrefs
+  | ([$i.assigned.nodes[] | select(.assignee.login == $a) | .createdAt]
+      + [$i.comments.nodes[] | select(.author.login == $a) | .createdAt]
+      + [$xrefs[].createdAt] | map(ts) | max) as $last
+  | ([$m[] | select((.createdAt | ts) > ($last // 0)) | .createdAt]
+      | max) as $check
+  | (if $check then $check | ts else $last end) as $since
+  | ([$i.comments.nodes[] | select(human)] | max_by(.createdAt | ts)
+      | .author.login == $a) as $asked
+  | ($xrefs | map(.source) | split) as $pr
+  | ($since | if . then days else null end) as $idle
+  | {issue: $i.number, assignee: $a,
+     open_prs: $pr.open, merged_prs: $pr.merged, idle_days: $idle,
+     checked_at: $check, asked_last: $asked,
+     stale: (if $idle == null or ($i | cut) then null
+       else $idle >= $days and ($pr.open + $pr.merged | length == 0)
+       end)};
+[$issues[] | claim] as $claims |
 {
+  maintainers_known: ($pushers | length > 0),
   unanswered: [$issues[] | select(maint | length == 0)
     | {issue: .number, author: .author.login, age_days: (.createdAt | age)}]
     | sort_by(-.age_days),
-  waiting: [$issues[] | select(.author != null
-      and (.authorAssociation | staff | not))
+  waiting: [$issues[] | select(.author != null and (staff | not))
+    | .number as $n | .author.login as $a
     | (maint | max_by(.createdAt | ts)) as $ask
     | select($ask != null and ($ask.createdAt | ts) > mine)
     | {issue: .number, author: .author.login, asked_by: $ask.author.login,
        asked_at: $ask.createdAt, idle_days: ($ask.createdAt | age),
-       overdue: (($ask.createdAt | age) >= $days)}]
+       overdue: (($ask.createdAt | age) >= $days),
+       claimed: any($claims[]; .issue == $n and .assignee == $a)}]
     | sort_by(-.idle_days),
   linked: [$issues[] | (.createdAt | ts) as $born
-    | [.timelineItems.nodes[] | select(.source.number != null
-        and .source.repository.nameWithOwner == $repo
-        and (.createdAt | ts) >= $born) | .source] as $prs
+    | [prs[] | select((.createdAt | ts) >= $born) | .source] as $prs
     | select($prs | length > 0)
-    | {issue: .number,
-       merged: [$prs[] | select(.mergedAt != null) | .number] | unique,
-       open: [$prs[] | select(.state == "OPEN") | .number] | unique}],
+    | {issue: .number} + ($prs | split)],
+  claimed: $claims | sort_by(-(.idle_days // 1e9)),
   lint: [$issues[] | gaps as $g | select($g | length > 0)
     | {issue: .number, title, gaps: $g}],
-  truncated: [$issues[] | select(.comments.totalCount > 100
-      or .timelineItems.totalCount > 100) | .number]
+  truncated: [$issues[] | select(cut) | .number]
 }'
