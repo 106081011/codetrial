@@ -9,6 +9,8 @@ const HTML_ESCAPES = {
   "'": "&#39;",
 };
 
+export const SHOW_SOURCES_KEY = "codetrial.showProblemSources";
+
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => HTML_ESCAPES[char]);
 }

@@ -13,6 +13,7 @@ import {
   launchChromium,
   startStaticServer,
 } from "./source.js";
+import { SHOW_SOURCES_KEY } from "../../web/lib.js";
 
 let browser = null;
 let server = null;
@@ -73,6 +74,54 @@ test("the worked examples can be hidden, and stay hidden on the next visit", asy
       (await problemTab(page)).examples,
       1,
       "unticking brings them back",
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test("the interview hides the published problem name when the toggle is off", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.evaluate(
+      (key) => localStorage.setItem(key, "0"),
+      SHOW_SOURCES_KEY,
+    );
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page
+      .locator("#problem-panel .problem-detail")
+      .waitFor({ state: "attached" });
+    assert.doesNotMatch(
+      await page.locator("#problem-panel").textContent(),
+      /LeetCode:/,
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test("the interview shows the published problem name when the toggle is on", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${base}/interview.html?problem=chargeback-pair-match`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.evaluate(
+      (key) => localStorage.setItem(key, "1"),
+      SHOW_SOURCES_KEY,
+    );
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page
+      .locator("#problem-panel .problem-detail")
+      .waitFor({ state: "attached" });
+    assert.match(
+      await page.locator("#problem-panel").textContent(),
+      /LeetCode: Two Sum/,
     );
   } finally {
     await page.close();

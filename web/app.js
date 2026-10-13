@@ -1,4 +1,10 @@
-import { FRAMEWORKS, codingLoop, interviewMode, languageLabel } from "./lib.js";
+import {
+  FRAMEWORKS,
+  SHOW_SOURCES_KEY,
+  codingLoop,
+  interviewMode,
+  languageLabel,
+} from "./lib.js";
 import {
   clearReportHistory,
   deleteReport,
@@ -156,13 +162,8 @@ for (const card of cards) mark(card.button, false);
 // The published names are off unless the candidate turns them on, and the
 // choice is theirs to keep between visits. A convenience, so storage that
 // throws (a private window, blocked site data) just means off.
-const SHOW_SOURCES_KEY = "codetrial.showProblemSources";
 const showSources = document.querySelector("#show-sources");
-try {
-  showSources.checked = localStorage.getItem(SHOW_SOURCES_KEY) === "1";
-} catch {
-  /* off */
-}
+showSources.checked = readStored(SHOW_SOURCES_KEY) === "1";
 // The published names are not in the page: they arrive with the map, fetched
 // the first time the candidate turns them on.
 const applySources = async () => {
@@ -185,11 +186,7 @@ const applySources = async () => {
 };
 showSources.addEventListener("change", () => {
   void applySources();
-  try {
-    localStorage.setItem(SHOW_SOURCES_KEY, showSources.checked ? "1" : "0");
-  } catch {
-    /* the page still shows what was chosen */
-  }
+  writeStored(SHOW_SOURCES_KEY, showSources.checked ? "1" : "0");
 });
 void applySources();
 const levels = [...document.querySelectorAll('[name="difficulty"]')];

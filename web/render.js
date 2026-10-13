@@ -205,10 +205,15 @@ function sourceEventMarkup(event) {
 // No constraints section and no source statement: the page carries the scenario
 // the interview poses, and the limits and edge-case policies are what the
 // candidate asks Jim for, the way they would ask a person. The published title
-// is named once, small, so the problem can be found again after the interview.
+// is left out unless showSources is set, the lobby's "Show the LeetCode
+// problem" choice; then it is named once, small, so the problem can be found
+// again after the interview.
 // The worked examples can be left out, so the Example step starts from cases
 // the candidate proposes instead of ones already on screen.
-export function problemMarkup(problem, { examples = true } = {}) {
+export function problemMarkup(
+  problem,
+  { examples = true, showSources = false } = {},
+) {
   const example = (example, index) => `
           <section>
             <h2>Example ${index + 1}</h2>
@@ -224,7 +229,7 @@ export function problemMarkup(problem, { examples = true } = {}) {
   return `
     <div class="problem-detail">
       <p class="interview-kicker">Interview exercise</p>
-      ${problem.source ? `<p class="problem-source">LeetCode: ${escapeHtml(problem.source)}</p>` : ""}
+      ${showSources && problem.source ? `<p class="problem-source">LeetCode: ${escapeHtml(problem.source)}</p>` : ""}
       ${problem.requestedPage ? `<p class="muted small">The link asked for an exercise this bank does not have, so this is the default exercise.</p>` : ""}
       ${problem.brief.map((text) => `<p>${escapeHtml(text)}</p>`).join("")}
       ${
