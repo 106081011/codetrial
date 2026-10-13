@@ -3099,6 +3099,7 @@ async function saveHistory(report = state.report) {
     language: whiteboard ? "" : state.language,
     durationMin,
     interviewLoop,
+    interviewMode: mode,
     report,
   };
   // A later save may replace an earlier report under this same id. Keep the

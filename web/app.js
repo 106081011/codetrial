@@ -37,6 +37,9 @@ import {
   setEditorOptions,
 } from "./editor-options.js";
 
+import { readStored, writeStored } from "./audio-output.js";
+
+const SETTINGS_KEY = "codetrial.interviewSettings";
 const requestTimeoutMs = 10_000;
 
 let problem;
@@ -54,6 +57,8 @@ let manualProblem = false;
 /// drawn from changes.
 let keptDraw = null;
 let manualDuration = false;
+// Preserve the explicit preference independently of the effective server limit.
+let chosenDuration;
 let manualDifficulty = false;
 let historyReady = false;
 let historyLoad = 0;
@@ -335,15 +340,17 @@ nodes.deleteReports.addEventListener("click", deleteSavedReports);
 
 const durations = [...document.querySelectorAll("[data-duration]")];
 for (const button of durations) {
-  button.addEventListener("click", () =>
-    setDuration(Number(button.dataset.duration), true),
-  );
+  button.addEventListener("click", () => {
+    if (starting) return;
+    setDuration(Number(button.dataset.duration), true);
+  });
 }
 
 for (const button of document.querySelectorAll("[data-loop]")) {
   button.addEventListener("click", () => {
-    interviewLoop = codingLoop(button.dataset.loop);
-    select("[data-loop]", button);
+    if (starting) return;
+    setInterviewLoop(button.dataset.loop);
+    rememberSettings();
   });
 }
 
@@ -352,18 +359,8 @@ for (const button of document.querySelectorAll("[data-mode]")) {
     // A start already on its way out has read the mode it will open, so a
     // click now would light a surface the interview is not going to use.
     if (starting) return;
-    mode = interviewMode(button.dataset.mode);
-    select("[data-mode]", button);
-    nodes.editorOptions.disabled = mode === "whiteboard";
-    // Said once, here, because every other difference the candidate will meet
-    // follows from it: no editor, no test runner, and a board the interviewer
-    // is sent as they draw.
-    const note = document.querySelector("#mode-note");
-    note.textContent =
-      mode === "whiteboard"
-        ? "Whiteboard: no editor and no test runner. You explain by drawing, and Jim sees the board as you go."
-        : "";
-    note.hidden = mode !== "whiteboard";
+    setInterviewMode(button.dataset.mode);
+    rememberSettings();
   });
 }
 
@@ -377,6 +374,8 @@ let signInFirst = false;
 /// disabled state. Without this a card click re-armed a button that was already
 /// leaving and bought a second navigation out of one start.
 let starting = false;
+
+restoreSettings();
 
 // The button by name, not by asking the event which element it was dispatched
 // to: the browser clears that property when dispatch ends, so every line after
@@ -1149,6 +1148,63 @@ function suggestedDuration(difficulties) {
   return difficulties.has("Medium") || difficulties.has("Hard") ? 45 : 30;
 }
 
+function setInterviewLoop(value) {
+  interviewLoop = codingLoop(value);
+  select(
+    "[data-loop]",
+    document.querySelector(`[data-loop="${interviewLoop}"]`),
+  );
+}
+
+function setInterviewMode(value) {
+  mode = interviewMode(value);
+  select("[data-mode]", document.querySelector(`[data-mode="${mode}"]`));
+  nodes.editorOptions.disabled = mode === "whiteboard";
+  const note = document.querySelector("#mode-note");
+  note.textContent =
+    mode === "whiteboard"
+      ? "Whiteboard: no editor and no test runner. You explain by drawing, and Jim sees the board as you go."
+      : "";
+  note.hidden = mode !== "whiteboard";
+}
+
+function rememberSettings() {
+  writeStored(
+    SETTINGS_KEY,
+    JSON.stringify({
+      durationMin: chosenDuration,
+      interviewLoop,
+      interviewMode: mode,
+    }),
+  );
+}
+
+function restoreSettings() {
+  setInterviewLoop(interviewLoop);
+  setInterviewMode(mode);
+  let settings;
+  try {
+    settings = JSON.parse(readStored(SETTINGS_KEY));
+  } catch {
+    return;
+  }
+  if (!settings || typeof settings !== "object") return;
+  if (
+    durations.some(
+      (button) => Number(button.dataset.duration) === settings.durationMin,
+    )
+  ) {
+    setDuration(settings.durationMin, true);
+  }
+  if (["coding_only", "coding_behavioral"].includes(settings.interviewLoop)) {
+    setInterviewLoop(settings.interviewLoop);
+  }
+  if (["coding", "whiteboard"].includes(settings.interviewMode)) {
+    setInterviewMode(settings.interviewMode);
+  }
+  rememberSettings();
+}
+
 /// A suggestion unless `chosen` says the candidate picked it out loud, and once
 /// they have, nothing suggests over it again. The latch never releases: someone
 /// who asks for sixty minutes keeps it even if their history later moves them
@@ -1159,22 +1215,25 @@ function suggestedDuration(difficulties) {
 function setDuration(minutes, chosen = false) {
   if (manualDuration && !chosen) return;
   manualDuration ||= chosen;
+  if (chosen) chosenDuration = minutes;
   duration = underCeiling(minutes);
   select(
     "[data-duration]",
     document.querySelector(`[data-duration="${duration}"]`),
   );
+  if (chosen) rememberSettings();
 }
 
 /// Snapped to a length the row actually offers, not to the cap itself: a cap
 /// of forty would otherwise leave `duration` at forty with no button to show
-/// for it, and the candidate reading a row where nothing is selected.
+/// for it, and the candidate reading a row where nothing is selected. When no
+/// offered length fits, use the ceiling and explain it in the duration note.
 function underCeiling(minutes) {
   if (minutes <= durationCeiling) return minutes;
   const offered = durations
     .map((button) => Number(button.dataset.duration))
     .filter((value) => value <= durationCeiling);
-  return offered.length ? Math.max(...offered) : minutes;
+  return offered.length ? Math.max(...offered) : durationCeiling;
 }
 
 /// What the server said it can record, turned into a row that says so. The
@@ -1187,20 +1246,21 @@ function applyDurationCeiling(minutes) {
   const over = durations.filter(
     (button) => Number(button.dataset.duration) > minutes,
   );
-  // A cap under every length on offer is a misconfigured deployment, not a
-  // lobby with nothing to press. Leave the row alone and let the server's own
-  // floor decide, rather than handing back a page that cannot start anything.
+  // Keep the row usable when no offered length fits, but show and request
+  // the effective limit instead of promising a length the server will shorten.
   const capped = over.length < durations.length ? over : [];
   for (const button of durations) button.disabled = capped.includes(button);
   nodes.durationNote.textContent = capped.length
     ? `Interviews here are recorded for at most ${minutes} minutes, so longer ones are not offered.`
-    : "";
-  nodes.durationNote.hidden = !capped.length;
+    : over.length
+      ? `Interviews here are limited to ${minutes} minutes; all duration choices use this limit.`
+      : "";
+  nodes.durationNote.hidden = !over.length;
   // The cap outranks a length the candidate chose out loud, which nothing else
   // here does: it is not a second opinion about what suits them, it is what
   // this server can record.
-  if (duration > durationCeiling) {
-    duration = underCeiling(duration);
+  if (duration > durationCeiling || manualDuration) {
+    duration = underCeiling(manualDuration ? chosenDuration : duration);
     select(
       "[data-duration]",
       document.querySelector(`[data-duration="${duration}"]`),
@@ -1327,6 +1387,7 @@ function renderAttemptHistory(attempts) {
       open.textContent = "Collapse report";
     });
     retry.addEventListener("click", () => {
+      if (starting) return;
       const card = cards.find(
         (candidate) => candidate.id === attempt.problemId,
       );
@@ -1334,8 +1395,25 @@ function renderAttemptHistory(attempts) {
       manualProblem = true;
       card.button.hidden = false;
       setProblem(card);
-      setDuration(suggestedDuration(new Set([card.difficulty])));
-      nodes.recommendation.textContent = `Selected problem: ${title(card)}.`;
+      const savedDuration = attempt.durationMin;
+      const offered = durations.map((button) =>
+        Number(button.dataset.duration),
+      );
+      const minutes =
+        savedDuration === null
+          ? suggestedDuration(new Set([card.difficulty]))
+          : (offered
+              .filter((value) => value <= savedDuration)
+              .sort((a, b) => b - a)[0] ?? Math.min(...offered));
+      setDuration(minutes, savedDuration !== null);
+      setInterviewLoop(attempt.interviewLoop);
+      setInterviewMode(attempt.interviewMode);
+      rememberSettings();
+      const adjustment =
+        savedDuration !== null && duration !== savedDuration
+          ? ` Previous duration: ${savedDuration} minutes; adjusted to ${duration} minutes for the available lengths and current limit.`
+          : "";
+      nodes.recommendation.textContent = `Selected problem: ${title(card)}.${adjustment}`;
     });
     item.append(label, open, download, retry);
     // A row with no id has nothing both stores and the account agree on, and
