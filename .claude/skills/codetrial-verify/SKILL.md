@@ -147,6 +147,17 @@ test computed with the function under test. The check that separates them is
 cheap and is the one to run before believing a new test: break the thing it
 names, watch it fail, put it back.
 
+Two shapes reviewers reject in browser tests. A test that reads source text
+with a regex instead of driving the page passes against code that never runs
+(#225, #266). And a test that asserts right after an action races the page:
+a value set on the next animation frame, or a handler bound only after
+`init()` finishes its top-level `await`, reads stale on a loaded CI runner and
+fresh on a laptop (#226, #266, #269). Wait for the observable value, not a
+timeout. A CI failure that does not reproduce locally may be such a race, a
+stale base or an environment limit;
+[collaboration.md](../codetrial-contribute/collaboration.md#make-ci-green-before-asking-for-review)
+has how to tell them apart. A rerun is not the fix.
+
 ## Seeing it work in the app
 
 When a fix needs a live look, build the release binary and start the server

@@ -36,6 +36,12 @@ days=${2:-7}
 me=$(gh api user --jq .login)
 text=$(dirname "$0")/rebase.md
 
+# The short request maintainers write by hand asks for a subset of rebase.md, so
+# it counts as a rebase request too where the default branch is the main it
+# names, but the sweep never posts it.
+# shellcheck disable=SC2016
+short='Rebase latest `main` branch and resolve conflicts.'
+
 # A thread reply is a review by its writer, so author replies show up in
 # reviews. A review records the head it was left on, so a head that moved since
 # says exactly that someone pushed after it. pushedDate is always null now, and
@@ -96,14 +102,14 @@ runs=$(gh api --paginate \
 runs=$(printf '%s\n' "$runs" | jq -s .)
 
 # A rebase request is a visible changes-requested review from someone other than
-# the author whose body is exactly rebase.md and which carries no inline
-# comments, since hiding a review collapses what it carries. Any other review
-# that mentions rebase may ask for more, so it only ever lands in hide_ask.
-# GitHub refuses a review of one's own PR, so the viewer's PRs are never in
-# rebase, and rebase.md names the default branch, so a PR stacked on another
-# branch is left to its reviewer.
+# the author whose body is exactly rebase.md or the short request and which
+# carries no inline comments, since hiding a review collapses what it carries.
+# Any other review that mentions rebase may ask for more, so it only ever lands
+# in hide_ask. GitHub refuses a review of one's own PR, so the viewer's PRs are
+# never in rebase, and rebase.md names the default branch, so a PR stacked on
+# another branch is left to its reviewer.
 printf '%s\n%s\n' "$prs" "$runs" | jq -s --argjson days "$days" --arg me "$me" \
-    --arg base "$base" --rawfile text "$text" '
+    --arg base "$base" --rawfile text "$text" --arg short "$short" '
 def human: .author != null and .author.__typename != "Bot";
 def ts: if . == null then 0 else fromdateiso8601 end;
 def pushed: [.commits.nodes[0].commit.committedDate,
@@ -115,7 +121,8 @@ def nudgeable: .author != null and .author.login != $me;
 def requests: .author.login as $a | [.reviews.nodes[]
   | select(human and .author.login != $a and .state == "CHANGES_REQUESTED"
       and (.isMinimized | not))];
-def fixed_only: .comments.totalCount == 0 and (.body | trim == $fixed);
+def fixed_only: .comments.totalCount == 0
+  and (.body | trim | . == $fixed or ($base == "main" and . == $short));
 def asks_rebase: [requests[] | select(fixed_only)]
   | sort_by(.submittedAt | ts);
 def needs_rebase: .mergeable == "CONFLICTING" and (.isDraft | not)

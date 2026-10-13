@@ -1,20 +1,14 @@
 ---
 name: codetrial-triage
 description: >
-  Triage CodeTrial GitHub issues and open pull requests. Find duplicate,
-  incomplete or not-yet-actionable issues and recommend evidence-backed actions,
-  including notifying contributors that a thread already exists and closing the
-  duplicates; keep filed reports moving by finding the ones nobody answered, the
-  ones waiting on their reporter, and the ones a merged pull request may have
-  fixed; sweep pull requests for held workflow runs, outdated review threads,
-  functional overlap, unanswered reviews and merge conflicts. Use for backlog
-  triage, checking new issues or pull requests, deciding whether a symptom
-  already has an issue, or asking what needs attention. Reviewing authorizes no GitHub edit
-  except run approvals, thread resolutions, rebase requests and hiding
-  superseded rebase reviews covered by an explicit pull-request sweep. A comment
-  that delivers a triage verdict on someone else's thread belongs here; use
-  codetrial-contribute for text written on a contributor's behalf, a new issue
-  or pull request, or a maintainer question.
+  Review CodeTrial issues and pull requests for duplicates, missing evidence,
+  unanswered requests, linked fixes, overlapping work and stalled review, and
+  draft the reminders, acceptances and closes that follow. Use for backlog
+  triage, checking new issues or PRs, asking what needs attention, deciding
+  whether a symptom already has an issue, and explicit PR sweeps. Default to
+  a read-only report; a PR sweep has narrowly defined actions in pulls.md.
+  Use codetrial-contribute for drafts on a contributor's behalf, new issues
+  or PRs, and focused maintainer questions.
 ---
 
 # Triage CodeTrial issues and pull requests
@@ -36,6 +30,11 @@ A request about open pull requests ("sweep the PRs", "which PRs are stuck")
 follows [pulls.md](pulls.md) after the scope below. The duplicate reasoning
 here applies to PRs too, and the confirmed-list rule governs every comment it
 drafts.
+
+How work moves on this tracker (who the maintainers are, how a PR is scoped,
+what the one-line review requests mean) is in
+[collaboration.md](../codetrial-contribute/collaboration.md). Recheck linked PR
+status before carrying forward an earlier next step.
 
 ## Establish the scope
 
@@ -191,7 +190,7 @@ titles or the same broad symptom are insufficient to establish duplication.
   `closingIssuesReferences` and its commit messages as well as its body, since a
   Development-sidebar link or a closing keyword in a commit closes an issue even
   when the body has none, and read what you find against the `Closes` and `Refs`
-  rule in conventions. Say it needs a manual close when nothing carries the
+  rule in CONTRIBUTING.md. Say it needs a manual close when nothing carries the
   reference, and never promise the merge will close it otherwise.
 - **Already shipped**: the tree already does what the request asks. `git grep -n`
   over `src` and `web` finds a candidate and settles nothing, since a string also
@@ -233,7 +232,7 @@ Which verdicts close, and on what:
 | Superseded by an open pull request | no | read `closingIssuesReferences`; its merge closes it, or it needs a manual close |
 | Possibly duplicate, related, no duplicate found | no | waiting on a fact or on work |
 | Not actionable yet | not at first | ask for the edit; the waiting rule below decides later |
-| Waiting on the reporter past both windows below | yes | `--reason "not planned"`, with the fact that reopens it |
+| Waiting on the reporter past both windows below, with action still blocked | yes | `--reason "not planned"`, with the fact that reopens it |
 
 A filing date is not a build revision, and the error runs one way. A date can
 prove a build LACKS a commit, because a binary downloaded before a commit
@@ -263,7 +262,7 @@ is not an empty backlog. Use a compact table with:
 
 Explain uncertainty rather than presenting guesses as root causes. Prioritize by
 demonstrated impact on interview use. Propose a title correction when a title
-breaks the conventions title rule. Do not close reports for age, AI assistance,
+breaks the title rule in CONTRIBUTING.md. Do not close reports for age, AI assistance,
 imperfect English or missing nonessential fields. A report that has gone
 unanswered because its reporter stopped replying is a different case, and the
 next section covers it.
@@ -287,17 +286,23 @@ The three sweep lists are the queue, and each one has a fixed next move:
   edited the body since. Read that comment first. A correction or a note
   carried over from another thread is not a question; neither is "see if PR #N
   resolves this", which is a request to the maintainer and belongs under
-  `linked`. When the newest maintainer comment is already the reminder below,
-  its `asked_at` starts the second window, so an `overdue` entry then means
-  proposing the close, never a second reminder. Otherwise, once an entry is
-  `overdue`, post one reminder on the thread. It
-  repeats the same fact in the same words, says how to get it with the recipe
-  from [codetrial-contribute](../codetrial-contribute/SKILL.md), and says that
-  the issue closes if nothing arrives in another wait period. When that second
-  period also passes in silence, propose closing as not planned. The closing
-  comment names the fact again and says that posting it reopens the issue. An
-  issue a maintainer opened is left out of `waiting`, because its author already
-  knows the rule.
+  `linked`. When a maintainer comment in the thread is already the reminder
+  below, the deadline it names governs, even when a later maintainer comment
+  rescoped the request and so restarted `asked_at` (#212 kept its 2026-10-17
+  deadline that way); a reminder that names no date starts the second window
+  at its own date. Either way the next move is the disposition, never a second
+  reminder. Otherwise, once an entry is `overdue`, propose one reminder for
+  the thread on the confirmed list. It repeats the still-missing fact, says how to get it with the
+  recipe from [codetrial-contribute](../codetrial-contribute/SKILL.md), and
+  names the deadline and the disposition. When the deadline passes in
+  silence, propose closing as not planned only if the missing fact still
+  blocks action. A settled implementation direction is not abandoned for lack
+  of a retest: #136 proceeds with removing Pause if no contrary evidence
+  arrives. Read the latest disposition first. When a linked PR merges or the
+  facts change while a reminder is pending, rescope the request and keep its
+  deadline. The closing comment names the fact again and says that posting it
+  reopens the issue. An issue a maintainer opened is left out of `waiting`,
+  because its author already knows the rule.
 - `linked`, with `merged` set: a merged pull request referenced the issue after
   it was filed, and GitHub did not close it, so that PR only touched it, or its
   `Closes` line named another issue. Read the PR and the issue. When the PR does
@@ -310,7 +315,11 @@ The three sweep lists are the queue, and each one has a fixed next move:
   PR. When it implements the request, the issue is superseded by that open pull
   request (see the verdicts above). Ask the reporter, and anyone in the thread about to
   write a second branch, to test that PR. Say how to check it out, since many
-  reporters have never fetched a pull request.
+  reporters have never fetched a pull request. A maintainer's own fix PR gets
+  the short back-link "See if PR #N resolves this issue." (#140, #149, #151).
+  When a reporter closed an issue that an open PR still `Closes`, check that
+  the defect still holds on `main`; if it does, propose reopening it on the
+  confirmed list, so the merge records the fix (#210).
 
 The two windows are the sweep's `wait-days` argument, 7 by default. Report each
 list's counts next to the duplicate counts, so the maintainer sees what is
@@ -348,9 +357,15 @@ What the shapes add:
   pieces as the bug form or the feature fields name them, and point at one
   issue from this tracker that has them, such as #149 for a measured bug or
   #173 for a feature.
+- Accepting a scoped request: the parts
+  [collaboration.md](../codetrial-contribute/collaboration.md#start-with-an-actionable-contribution)
+  lists. A "can I work on this?" gets the same once the scope is clear, or
+  "Analyze and confirm in advance." when it is not (#182).
 - Reminding a reporter: one short paragraph, addressed with an @mention, that
-  repeats the open question and the date it was asked. Never a second wording
-  of the question.
+  repeats the open question and the date it was asked, and names the deadline
+  and what happens then: closing as not planned, with posting afterwards
+  reopening it, or proceeding as already decided (#136). Never a second
+  wording of the question.
 - Closing for no reply: say what was asked and when, that the report could not
   be acted on without it, and the exact thing to post to reopen it. Not a
   verdict on the report.
