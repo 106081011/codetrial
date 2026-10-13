@@ -110,6 +110,29 @@ export function buildProgressModel(rawEntries, filters = {}) {
   return progressModelFrom(normalizeProgressEntries(rawEntries), filters);
 }
 
+export function phaseChartData(attempts, phase, frameworkPhases) {
+  const framework = new Set(frameworkPhases);
+  return {
+    points: (Array.isArray(attempts) ? attempts : []).map(
+      (attempt, attemptIndex) => {
+        const assessment = attempt.report.incomplete
+          ? null
+          : attempt.report.frameworkAssessment;
+        const row = assessment?.phases.find((item) => item.phase === phase);
+        const frameworkAssessed = (assessment?.phases ?? []).some(
+          (item) => framework.has(item.phase) && item.score !== null,
+        );
+        return {
+          attemptIndex,
+          frameworkAssessed,
+          rubricVersion: assessment?.rubricVersion ?? null,
+          score: row?.score ?? null,
+        };
+      },
+    ),
+  };
+}
+
 export function progressModelFrom(normalized, filters = {}) {
   const matches = (entry, key) =>
     filters[key] == null ||
@@ -135,23 +158,30 @@ export function progressModelFrom(normalized, filters = {}) {
       activeSegments =
         version === null
           ? null
-          : Object.fromEntries(
-              progressPhases.map((phase) => {
-                const segment = { rubricVersion: version, points: [] };
-                series[phase].push(segment);
-                return [phase, segment];
-              }),
-            );
+          : Object.fromEntries(progressPhases.map((phase) => [phase, null]));
     }
     if (!assessment || !activeSegments) continue;
+    const assessedFrameworks = new Set(
+      assessment.phases
+        .filter((row) => row.score !== null)
+        .map((row) => phaseFramework.get(row.phase)),
+    );
     for (const row of assessment.phases) {
       if (row.score !== null) {
-        activeSegments[row.phase].points.push({
+        let segment = activeSegments[row.phase];
+        if (segment === null) {
+          segment = { rubricVersion: version, points: [] };
+          series[row.phase].push(segment);
+          activeSegments[row.phase] = segment;
+        }
+        segment.points.push({
           attemptIndex,
           at: attempt.at,
           score: row.score,
           problemTitle: attempt.problemTitle,
         });
+      } else if (assessedFrameworks.has(phaseFramework.get(row.phase))) {
+        activeSegments[row.phase] = null;
       }
       const flagged = row.weaknessTags.length > 0;
       if (row.score === null && !flagged) continue;

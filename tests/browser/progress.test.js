@@ -8,6 +8,7 @@ import {
   buildProgressModel,
   normalizeProgressEntries,
   normalizeProgressEntry,
+  phaseChartData,
   pickerEntry,
   progressModelFrom,
   progressPhases,
@@ -383,6 +384,77 @@ test("history without topics still builds", () => {
   assert.equal(model.attempts.length, 1);
 });
 
+test("chart data distinguishes an unscored framework from a missing phase", () => {
+  const first = entry("first", "2026-01-01", 60);
+  const missing = entry("missing", "2026-01-02", null);
+  missing.report.frameworkAssessment.phases.find(
+    (row) => row.phase === "Coding",
+  ).score = 70;
+  const behavioral = entry("behavioral", "2026-01-03", null);
+  behavioral.report.frameworkAssessment.phases.find(
+    (row) => row.phase === "Action",
+  ).score = 80;
+  const attempts = buildProgressModel([first, missing, behavioral]).attempts;
+  const chart = phaseChartData(attempts, "Algorithm", [
+    "Repeat",
+    "Example",
+    "Algorithm",
+    "Coding",
+    "Test",
+    "Optimizations",
+  ]);
+  assert.deepEqual(
+    chart.points.map(({ score, frameworkAssessed }) => ({
+      score,
+      frameworkAssessed,
+    })),
+    [
+      { score: 60, frameworkAssessed: true },
+      { score: null, frameworkAssessed: true },
+      { score: null, frameworkAssessed: false },
+    ],
+  );
+});
+
+test("an assessed null phase breaks only its own framework trend", () => {
+  const actionFirst = entry("action-first", "2026-01-01", null);
+  actionFirst.report.frameworkAssessment.phases.find(
+    (row) => row.phase === "Action",
+  ).score = 40;
+  const first = entry("first", "2026-01-02", 60);
+  const missing = entry("missing", "2026-01-03", null);
+  missing.report.frameworkAssessment.phases.find(
+    (row) => row.phase === "Coding",
+  ).score = 70;
+  const last = entry("last", "2026-01-04", 80);
+  const actionLast = entry("action-last", "2026-01-05", null);
+  actionLast.report.frameworkAssessment.phases.find(
+    (row) => row.phase === "Action",
+  ).score = 80;
+  const model = buildProgressModel([
+    actionFirst,
+    first,
+    missing,
+    last,
+    actionLast,
+  ]);
+
+  assert.deepEqual(
+    model.series.Algorithm.map((segment) =>
+      segment.points.map((point) => point.score),
+    ),
+    [[60], [80]],
+    "an assessed null Algorithm phase breaks the REACTO line",
+  );
+  assert.deepEqual(
+    model.series.Action.map((segment) =>
+      segment.points.map((point) => point.score),
+    ),
+    [[40, 80]],
+    "REACTO attempts do not split a STAR trend",
+  );
+});
+
 test("rubric changes and legacy attempts split otherwise comparable series", () => {
   const one = entry("one", "2026-01-01", 50);
   const legacy = { id: "legacy", date: "2026-02-01", report: {} };
@@ -407,6 +479,7 @@ test("rubric changes and legacy attempts split otherwise comparable series", () 
 test("lobby progress surface is accessible and separates the two frameworks", () => {
   const page = readFileSync(join(web, "index.html"), "utf8");
   const app = readFileSync(join(web, "app.js"), "utf8");
+  const styles = readFileSync(join(web, "styles.css"), "utf8");
   for (const id of [
     "progress-difficulty",
     "progress-language",
@@ -423,23 +496,46 @@ test("lobby progress surface is accessible and separates the two frameworks", ()
     page,
     /<fieldset class="progress-filters">\s*<legend>Filter attempts<\/legend>/,
   );
-  assert.match(app, /Rubric v\$\{segment\.rubricVersion\}/);
+  assert.match(app, /Rubric v\$\{point\.rubricVersion\}/);
   assert.match(app, /Not assessed in these attempts/);
-  assert.match(app, /no zeroes are plotted/);
+  assert.match(app, /not assessed, not a score of zero/);
   assert.match(app, /formative phase scores, not calibrated hiring evidence/);
   assert.match(app, /No topic labels are available for these attempts/);
   assert.match(app, /nodes\.progressTopics\.append\(item\)/);
-  // A table each, with its own caption naming the exercise it scores. One
-  // table with the two as groups inside it still read as a single ten-step
-  // scale, and neither half is evidence about the other.
+  // REACTO and STAR remain separate tables, but a framework with scores uses
+  // one chart whose selected step is controlled from the left column.
   assert.match(app, /for \(const framework of Object\.values\(FRAMEWORKS\)\)/);
   assert.match(
     app,
     /caption\.textContent = `\$\{framework\.name\} · \$\{framework\.scenario\}`/,
   );
-  assert.match(app, /nodes\.progressTrends\.append\(table\);\s*\}/);
+  assert.match(app, /renderFrameworkChart\(framework, model\)/);
+  assert.match(app, /progress-phase-button/);
+  assert.match(app, /progress-chart-point-missing/);
+  assert.match(app, /progress-chart-scroll/);
+  assert.match(app, /progress-chart-tooltip-version/);
+  assert.match(app, /classList\.toggle\("below"/);
+  assert.match(app, /tooltipCenter/);
+  assert.match(app, /target\.scrollLeft \+ target\.clientWidth/);
+  assert.match(app, /aria-describedby/);
+  assert.match(app, /wrapper\.tabIndex = 0/);
+  assert.match(app, /"aria-hidden": "true"/);
+  assert.match(app, /Score details/);
+  assert.match(app, /model\.series\[selected\.label\]/);
+  assert.match(app, /selectedProgressPhases/);
+  assert.match(app, /requestAnimationFrame/);
+  assert.match(app, /chartScroll\.scrollLeft = chartScroll\.scrollWidth/);
+  assert.match(app, /previousScrollLeft/);
+  assert.doesNotMatch(app, /svgElement\("title"\)/);
+  assert.doesNotMatch(app, /Math\.min\(2400/);
+  assert.match(app, /mouseenter/);
+  assert.match(app, /marker\.addEventListener\("click"/);
+  assert.match(app, /aria-pressed/);
+  assert.doesNotMatch(styles, /\.progress-chart-point:focus/);
+  assert.match(styles, /@media \(max-width: 720px\)/);
+  assert.match(styles, /flex-wrap: wrap/);
+  assert.doesNotMatch(app, /progress-chart-version/);
   assert.doesNotMatch(app, /colgroup/);
-  assert.doesNotMatch(app, /Formative phase trends/);
 });
 
 // The lobby's picker and its progress panel both unwrap entries the same way
