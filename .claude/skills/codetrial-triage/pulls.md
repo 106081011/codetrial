@@ -112,8 +112,10 @@ the nudge says the branch also needs that rebase rather than leaving the author
 to reconcile two notices.
 
 Before drafting, read the latest review and the unresolved threads so the
-notice can name what is waiting: which requested change, which question. A
-nudge that only says "please update" gets the same silence the review did. Ask
+notice can name what is waiting: which requested change, which question,
+which unanswered cubic finding. A bare "Any update?" (#225) only works on an
+author who already knows what is open; otherwise name it, as the 2026-10-09
+nudge on #143 did. Ask
 the author to push the change or reply on the thread, and say that a reply
 explaining why not is as good as a push. Never threaten closure; the table in
 SKILL.md does not close for age.
@@ -159,6 +161,33 @@ fixed-text ones that also carry inline comments. Matching "rebase" proves
 nothing about the rest of the body: #108's 2026-09-27 review also asks for `make
 indent`, and "please do not rebase" matches too. Put each on the confirmed list
 with its body, and hide only the ones whose every request the fixed text covers.
+
+
+## Recheck dependencies and substantive review
+
+A PR whose checks fail at its head needs its failing job read before anyone
+is told what to do, since review waits for green CI (see
+[collaboration](../codetrial-contribute/collaboration.md#make-ci-green-before-asking-for-review)).
+A failure the branch introduced waits on its author even when no human spoke
+last; a stale base is a rebase request; one `main` shares, or an environment
+limit, is the maintainer's. The sweep does not list these, and
+`gh pr list --repo "$repo" --state open --limit 1000 --json number,statusCheckRollup`
+does. A failing commit-message check skips every later step of the `check`
+job, so name it first. A second PR from the same author for the same change supersedes the
+first or is superseded by it; report which in the sweep output and leave the
+close to a maintainer. A PR opened from a fork's `main` fails CI on its own
+and needs a new PR from a topic branch, not a comparison. Any comment either
+case calls for goes through the confirmed list.
+
+A clean merge does not establish readiness. For a dependent draft, check whether
+its prerequisite merged and whether the author still needs to rebase, remove
+prerequisite commits, or mark it ready. Compare overlapping PRs by behavior as
+well as files; name the shared mechanism and the integration check needed by
+whichever lands second. Read current inline threads and failing job logs before
+calling a PR addressed. The shared
+[collaboration reference](../codetrial-contribute/collaboration.md) gives the
+maintainer examples and CI investigation criteria. This review grants no extra
+write permissions beyond the sweep actions above.
 
 ## Apply the comments
 

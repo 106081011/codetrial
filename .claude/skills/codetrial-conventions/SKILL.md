@@ -30,6 +30,13 @@ calibration, so run this when a subject is hard to fit:
 git log --no-merges --format=%s | awk '{print length}' | sort -n
 ```
 
+Three things reviewers reject that the hook cannot see. The body stands on its
+own: "Related to #263" in place of the reason got "explain the rationale and
+context" (#268). No `Co-authored-by` or "Generated with" trailer attributing
+an AI tool (#251, #256, #285); a human co-author's credit stays. And a subject
+that names only the file, such as GitHub's web-editor default "Update
+web/app.js", is what a maintainer calls meaningless (#276).
+
 ## Prose register
 
 Markdown files are exempt from the ASCII rule and use ordinary GitHub Markdown,
@@ -120,9 +127,18 @@ skill says when a sweep applies them without a separate confirmation.
 ## Pull request branches and review replies
 
 The branch rules and what a review thread may carry are in `CONTRIBUTING.md`.
+Only "not `main`" binds a branch name; `fix/...`, `feat/...` and bare words
+have all merged.
+
 The addition here is why the thread stays thin: the commit body already carries
 what and why, so a reply that re-summarizes the diff is telling the reviewer
-what git is showing them.
+what git is showing them. A reply opens with the fact. It carries no greeting,
+thanks, apology ("Sorry for the delay"), self-introduction ("my first issue"),
+or list of what the last push changed; maintainers called out each of those on
+#60, #83, #94, #123, #185, #271 and #285. A counterexample to a review finding
+is a correction in CONTRIBUTING.md's sense and belongs in its thread.
+[collaboration.md](../codetrial-contribute/collaboration.md#review-evidence-including-bot-findings)
+has how to answer a bot finding.
 
 ## Layout
 

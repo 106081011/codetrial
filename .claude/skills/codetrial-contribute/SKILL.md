@@ -21,6 +21,10 @@ Example requests: "Turn these notes into an issue", "Help me make my first
 CodeTrial contribution", or "Write a PR description from this diff". Produce
 the artifact the user asked for.
 
+How work moves on this tracker, from who the maintainers are to what each
+one-line review request means, is in [collaboration.md](collaboration.md).
+Read it before planning work, scoping a PR or answering a review.
+
 ## Draft or improve an issue
 
 Check existing open and closed issues and related PRs first, using the retrieval
@@ -43,20 +47,23 @@ Choose the smallest useful structure:
   or other evidence. Identify the build by revision rather than by date, since
   published binaries move under a rolling tag (`docs/install.md`); triage has why
   that makes a date one-directional. Ask first what the binary reports about
-  itself; when it reports nothing, say the revision is unknown and give the exact
-  download timestamp, which still bounds the build from above.
+  itself. When it cannot report a revision, a download date alone is not
+  enough: a maintainer answers it with "Build from source instead." (#221;
+  #171), so reproduce on a build from source and report its `--version`.
   For an interview failure, `.github/ISSUE_TEMPLATE/bug.yml` is the field list;
   ask only for the ones that matter. The problem language matters because Python
   and JavaScript run in the browser while C, C++ and Java run remotely, so one
   symptom means two different things across that split. Record frequency or
   regression range when known.
-  Unknown details can stay explicitly unknown; a useful report need not
-  diagnose a fix. Retest on the current `latest` release or `main` before
+  Unknown details can stay explicitly unknown, but include the initial
+  analysis below when the code path can be found, since a maintainer asks for
+  it otherwise ([collaboration.md](collaboration.md#start-with-an-actionable-contribution)). Retest on the current `latest` release or `main` before
   filing: the lobby and the interviewer change daily, and #146 and #171 both
   reported behavior that had already been fixed after the reporter's download.
 - **Feature**: who is affected (candidate, operator or contributor) and in which
   workflow, desired outcome, present workaround, scope and observable acceptance
-  criteria. Keep a suggested implementation separate from the need it serves.
+  criteria. Keep a suggested implementation separate from the need it serves,
+  and compare the approaches rather than asking whether one is acceptable.
 - **Documentation**: page or section, what is missing or misleading, and the
   intended correction or reader outcome. Do not demand runtime logs for prose.
 
@@ -73,7 +80,7 @@ be run in the checkout, and check the result before it is posted.
 | Asked for | How to get it |
 | --- | --- |
 | The revision | `codetrial --version` with the binary that ran, or `cargo run -- --version` in a checkout. It prints `codetrial 0.1.0 (<sha>)`; post that line. |
-| The revision of a binary too old for `--version` | Builds before 3ec7cb4 (2026-09-29) print nothing. A saved report's header shows `Contract: bundle N`. Put that number in place of `N` in `git log -S'INTERVIEW_CONTRACT_BUNDLE_VERSION: u32 = N;' --format='%h %cI' -- src/agent.rs`, which then gives the commit that set it and the one that replaced it; the build lies between them, as #188 shows. Without a report, give the exact download time, which bounds the build from above. |
+| The revision of a binary too old for `--version` | Builds before 3ec7cb4 (2026-09-29) print nothing. A saved report's header shows `Contract: bundle N`. Put that number in place of `N` in `git log -S'INTERVIEW_CONTRACT_BUNDLE_VERSION: u32 = N;' --format='%h %cI' -- src/agent.rs`, which then gives the commit that set it and the one that replaced it; the build lies between them, as #188 shows. Without a report, the exact download time bounds the build from above, but expect to be asked to build from source. |
 | The agent terminal output | The terminal window where `codetrial` is running prints the agent log. Copy the lines around the failure, starting at `starting interview: room=...`. Remove API keys and tokens, and every line that quotes what the candidate said: personal interview content stays out of a public thread even when the contributor would not mind. |
 | The browser console | F12 or Ctrl+Shift+J (Cmd+Option+J on macOS) in Chrome and Edge, Ctrl+Shift+K in Firefox; Safari needs Settings, Advanced, "Show features for web developers" first. Copy the text rather than a screenshot. |
 | A retest of an open PR | From a checkout: `gh pr checkout <N> --repo sysprog21/codetrial`, or `git fetch https://github.com/sysprog21/codetrial.git pull/<N>/head:pr-<N> && git switch pr-<N>`, then `cargo run -- web`. Report the result on the PR, not on the issue. |
@@ -127,14 +134,18 @@ help the contributor explain what fails before and succeeds after the change.
 
 Read the full branch diff against its intended base, relevant commits and linked
 issues. Check that the branch contains the intended work only, and use a topic
-branch as described in conventions. Preserve unrelated working-tree edits.
+branch as described in conventions. Scope follows
+[collaboration.md](collaboration.md#scope-one-pull-request): unrelated fixes
+and unrequested behavior go to their own PR, review follow-ups stay in this
+one, and an open PR doing the same thing is reviewed rather than competed with. Preserve unrelated working-tree edits.
 AI-generated summaries are starting points: validate every claim against the
 diff and actual test results. Do not paste a conversation transcript.
 
 Use [codetrial-verify](../codetrial-verify/SKILL.md) for the appropriate validation
 and [codetrial-web](../codetrial-web/SKILL.md) when browser or wire behavior is
 involved. Report commands and outcomes, including failures and skipped or unrun
-checks with reasons. Local success is not evidence that remote CI passed.
+checks with reasons. Local success is not evidence that remote CI passed, and
+a PR is not ready for review until CI is green.
 
 The description should cover:
 
@@ -177,8 +188,9 @@ gh issue create --repo sysprog21/codetrial --title "$(cat "$SCRATCH/title.txt")"
 Finish with the verified URL and the next concrete step, including any
 outstanding evidence the contributor can supply. Tell the contributor that
 filing starts the work rather than finishing it: a maintainer usually asks
-something within a day, and an issue whose question goes unanswered for two
-weeks is closed.
+something within a day. A question left unanswered gets one dated reminder
+after about a week, naming a deadline; past it the issue may close as not
+planned, or proceed as already decided when the thread settled that.
 
 ## Follow through on what you filed
 
@@ -204,15 +216,20 @@ several. A fact that belongs in the report also goes into the body by editing
 it, so the next reader does not need the comments. When a maintainer links a
 PR that may fix the issue, retest it and say on the PR whether it does. When a
 fix merged and the retest passes, say so with the `--version` line, and close
-the issue if a maintainer has not. An open issue nobody can confirm stays on
+the issue, with the user's approval, if a maintainer has not. An open issue nobody can confirm stays on
 everyone's list.
 
 ## Answer a review
 
-Most review requests here are about git and the commit message, not about the
-code, and they recur. What each asks:
+Git and commit-message requests recur alongside substantive code review. Read
+the current inline threads, unanswered cubic findings and failing checks as
+well as the review summary. The one-line requests are decoded in
+[collaboration.md](collaboration.md#what-the-one-line-review-requests-mean);
+the git steps behind them:
 
-- "Rebase latest `main` and resolve conflicts": find the remote that points at
+- "Rebase latest `main` and resolve conflicts": synchronize before making the
+  review changes, then inspect what the updated base already supplies. Find the
+  remote that points at
   `sysprog21/codetrial` in `git remote -v`. On a fork it is usually missing, so
   add it with
   `git remote add upstream https://github.com/sysprog21/codetrial.git`; in a
@@ -229,20 +246,18 @@ code, and they recur. What each asks:
 - "Read cbea.ms/git-commit" or "refine commit messages": run
   `./scripts/git-commit-msg.sh --rules`, then `make hooks` so the next commit is
   checked before it leaves the machine. The body says what and why. The
-  conversation that produced the change stays out of it, and so do
-  `Co-Authored-By` trailers and "Generated with" lines for an AI tool.
+  conversation that produced the change stays out of it, and so do the AI
+  attribution trailers conventions names.
 - "Run `make indent`": run it, check that `git diff` shows only formatting, and
   amend the commit that introduced the code rather than adding a "format"
   commit.
-- "Append `Closes #N`" or "avoid `Refs`": put `Closes #N` alone on the last line
-  of the commit message as well as the PR body, when the change finishes the
-  issue. `Refs #N` is for a change that does not, and then the body says what
-  is left; a bare `Refs: #60` told the reviewer nothing.
+- "Append `Closes #N`" or "avoid ambiguous `Refs`": the PR finishes the issue,
+  so end the PR body, and by this tree's habit the commit message, with
+  `Closes #N`, each on its own line. `Refs #N` is for a PR that only touches
+  the issue, and then the body says what is left; a bare `Refs: #60` told the
+  reviewer nothing.
 - A question in a review thread: answer it in that thread. A changed line
   answers itself, so resolve the thread rather than replying "done".
 
-Replies follow the register in CONTRIBUTING.md, and maintainers here enforce it
-in public. A reply opens with the fact. It carries no greeting, thanks, apology
-("Sorry for the delay"), self-introduction ("my first issue"), or list of what
-the last push changed. Maintainers called out each of those on #83, #94, #123,
-#185 and #60.
+Replies follow the register in conventions, which maintainers enforce in
+public.

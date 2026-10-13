@@ -72,6 +72,23 @@ Never hand-edit a fixture. Everything in the generator is deterministic,
 timestamps included, because a fixture that changes on every run cannot be
 checked.
 
+## What review checks in a UI change
+
+The gate cannot see these, and reviews here keep raising them:
+
+- Accessibility. A toggle uses one pattern: a fixed name with `aria-pressed`,
+  or a label naming the action with no `aria-pressed`, never both (#251);
+  disabling the focused control drops focus, so move it first; `role="img"` hides the labels inside it; a tooltip needs a
+  keyboard-reachable trigger (#138, #226, #251, #276).
+- Theme. The page is dark-only; the editor alone has a light theme. A new
+  editor color is a `--code-*` custom property in `web/styles.css`, with its
+  light value in both `.editor-stack[data-theme="light"]` and the
+  `prefers-color-scheme: light` block, never a hex value inline (#252, #267).
+- Keys. A global `keydown` handler ignores IME composition (`isComposing`, and
+  `keyCode === 229` for engines that clear it early), `event.repeat`, and
+  modifier chords it does not own; the Cmd/Ctrl+Enter handler in
+  `web/interview.js` has all three guards (#144, #277).
+
 ## Generated pages
 
 `web/problems/`, `web/judges/` and the problem cards inside `web/index.html`
