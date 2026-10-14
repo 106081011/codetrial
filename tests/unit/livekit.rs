@@ -2615,8 +2615,20 @@ fn only_real_output_answers_a_prompt() {
         (GeminiEvent::TurnComplete, false),
         (GeminiEvent::Interrupted, false),
         (GeminiEvent::InputTranscript("hello".to_string()), false),
-        (GeminiEvent::CandidateVoiceActivity(true), false),
-        (GeminiEvent::CandidateVoiceActivity(false), false),
+        (
+            GeminiEvent::CandidateVoiceActivity {
+                active: true,
+                audio_offset: None,
+            },
+            false,
+        ),
+        (
+            GeminiEvent::CandidateVoiceActivity {
+                active: false,
+                audio_offset: None,
+            },
+            false,
+        ),
         (
             GeminiEvent::GoAway {
                 time_left: "50s".to_string(),
@@ -6765,6 +6777,60 @@ fn voiced_frames_are_reported_after_transcription_without_provider_events() {
         Some(&loud),
         start
     ));
+}
+
+#[test]
+fn timing_pcm_ignores_silent_missing_paused_and_thinking_frames() {
+    let start = Instant::now();
+    let loud = ::livekit::webrtc::audio_frame::AudioFrame {
+        data: vec![1000i16; 1600].into(),
+        sample_rate: 16_000,
+        num_channels: 1,
+        samples_per_channel: 1600,
+    };
+    let quiet = ::livekit::webrtc::audio_frame::AudioFrame {
+        data: vec![0i16; 1600].into(),
+        sample_rate: 16_000,
+        num_channels: 1,
+        samples_per_channel: 1600,
+    };
+    for mode in 0..5 {
+        let mut state = RuntimeState::default();
+        if mode == 1 {
+            state.paused = true;
+        }
+        if mode == 2 {
+            state.thinking_hold = crate::agent::ThinkingHold::Held { since: start };
+        }
+        let mut activity = RuntimeActivity::new(start);
+        let frame = match mode {
+            3 => Some(&quiet),
+            4 => None,
+            _ => Some(&loud),
+        };
+        note_candidate_audio_frame(&state, &mut activity, frame, start);
+        activity
+            .turn_timing
+            .note_transcript(start + Duration::from_millis(100));
+        let summary = activity
+            .turn_timing
+            .note_audio(start + Duration::from_secs(1), true)
+            .unwrap();
+        assert_eq!(
+            summary.start_source,
+            if mode == 0 {
+                "pcm_level"
+            } else {
+                "last_transcript"
+            },
+            "mode {mode}"
+        );
+        assert_eq!(
+            summary.wait,
+            Some(Duration::from_millis(if mode == 0 { 1000 } else { 900 })),
+            "mode {mode}"
+        );
+    }
 }
 
 #[test]

@@ -2061,6 +2061,91 @@ fn go_away_time_left_is_read_as_a_restart_event() {
     );
 }
 
+#[test]
+fn voice_activity_end_preserves_offset_before_transcript_and_audio() {
+    let message = parse_server_message(
+        r#"{"voiceActivity":{"type":"ACTIVITY_END","audioOffset":"1.25s"},"serverContent":{"inputTranscription":{"text":"done"},"modelTurn":{"parts":[{"inlineData":{"data":"AAA=","mimeType":"audio/pcm;rate=24000"}}]}}}"#,
+    );
+    assert_eq!(
+        message.events,
+        vec![
+            GeminiEvent::CandidateVoiceActivity {
+                active: false,
+                audio_offset: Some(Duration::from_millis(1_250))
+            },
+            GeminiEvent::InputTranscript("done".into()),
+            GeminiEvent::Audio {
+                bytes: vec![0, 0],
+                mime_type: "audio/pcm;rate=24000".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn voice_activity_keeps_its_original_order_before_interruption() {
+    let message = parse_server_message(
+        r#"{"voiceActivity":{"type":"ACTIVITY_END"},"serverContent":{"interrupted":true,"turnComplete":true,"inputTranscription":{"text":"new answer"}}}"#,
+    );
+    assert_eq!(
+        message.events,
+        vec![
+            GeminiEvent::CandidateVoiceActivity {
+                active: false,
+                audio_offset: None
+            },
+            GeminiEvent::Interrupted,
+            GeminiEvent::TurnComplete,
+            GeminiEvent::InputTranscript("new answer".into()),
+        ]
+    );
+}
+
+#[test]
+fn voice_activity_start_precedes_interruption_and_new_speech() {
+    for interrupted in [false, true] {
+        let message = json!({
+            "voiceActivity": {"type": "ACTIVITY_START"},
+            "serverContent": {"interrupted": interrupted, "inputTranscription": {"text": "new answer"}}
+        });
+        let mut expected = Vec::new();
+        expected.push(GeminiEvent::CandidateVoiceActivity {
+            active: true,
+            audio_offset: None,
+        });
+        if interrupted {
+            expected.push(GeminiEvent::Interrupted);
+        }
+        expected.push(GeminiEvent::InputTranscript("new answer".into()));
+        assert_eq!(parse_server_message(&message.to_string()).events, expected);
+    }
+}
+
+#[test]
+fn malformed_voice_offsets_do_not_drop_the_endpoint_or_panic() {
+    for offset in [
+        json!(null),
+        json!("bad"),
+        json!("-1s"),
+        json!("NaNs"),
+        json!("infs"),
+        json!("1e100s"),
+    ] {
+        let frame = json!({"voiceActivity": {"type": "ACTIVITY_END", "audioOffset": offset}});
+        assert_eq!(
+            parse_server_message(&frame.to_string()).events,
+            vec![GeminiEvent::CandidateVoiceActivity {
+                active: false,
+                audio_offset: None
+            }]
+        );
+    }
+    for kind in ["TYPE_UNSPECIFIED", "future_signal"] {
+        let frame = json!({"voiceActivity": {"type": kind, "audioOffset": "1s"}});
+        assert!(parse_server_message(&frame.to_string()).events.is_empty());
+    }
+}
+
 /// Content in the same frame has to reach the room before the loop considers
 /// replacing the transport. In particular, TurnComplete is the safe boundary
 /// a GoAway received during speech waits for.
@@ -4031,7 +4116,10 @@ fn provider_voice_activity_parses_only_known_activity_types() {
             parsed.events,
             expected
                 .into_iter()
-                .map(GeminiEvent::CandidateVoiceActivity)
+                .map(|active| GeminiEvent::CandidateVoiceActivity {
+                    active,
+                    audio_offset: Some(Duration::from_millis(320))
+                })
                 .collect::<Vec<_>>()
         );
     }

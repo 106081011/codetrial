@@ -131,6 +131,7 @@ pub(super) const REPLY_WAIT_SHOWN: Duration = Duration::from_secs(4);
 pub(super) const LATE_TRANSCRIPT_GRACE: Duration = Duration::from_secs(2);
 
 pub(super) struct RuntimeActivity {
+    pub(super) turn_timing: super::timing::TurnTiming,
     pub(super) last_code_change: Instant,
     /// The substantive revision and language last delivered silently or in a
     /// briefing; the code itself is `RuntimeState::code_shown`.
@@ -685,6 +686,7 @@ impl RuntimeActivity {
 
     pub(super) fn with_interim_review_cap(now: Instant, max_interim_reviews: usize) -> Self {
         Self {
+            turn_timing: super::timing::TurnTiming::default(),
             last_code_change: now,
             silent_editor_delivery: None,
             last_user_speech: now,
@@ -1091,6 +1093,7 @@ impl RuntimeActivity {
             && !(self.floor == Floor::AwaitingPlayout && audio_playing)
         {
             self.awaiting_reply_since = Some(now);
+            self.turn_timing.note_transcript(now);
 
             // The candidate has moved on past a prompt that went unanswered, so
             // their turn is what is owed now. Left set, a replacement minutes

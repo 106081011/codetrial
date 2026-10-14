@@ -97,6 +97,7 @@ mod media;
 mod report;
 mod rooms;
 mod session;
+mod timing;
 mod turn;
 
 // The room half reaches back for these on every inbound event, which is what
@@ -653,6 +654,13 @@ async fn replace_gemini_session(
 ) -> Result<ControlFlow<()>, Box<dyn std::error::Error + Send + Sync>> {
     // Neither a resume nor a cold open on the same key can get past a project
     // that cannot pay, so the budget is not spent learning that twice more.
+    session::finish_turn_timing(
+        room.name().as_str(),
+        context.activity,
+        &log_clock(context.state),
+        timing::TimingOutcome::Replaced,
+        &mut std::io::stderr().lock(),
+    );
     if context.gemini.closed_for_billing(interview.keys) {
         context.activity.live_exit = LiveOutcome::Billing;
         eprintln!(
@@ -1162,6 +1170,7 @@ fn hold_owed_reply(state: &mut RuntimeState, owed_prompt: Option<&str>) {
 /// replacement makes the new interviewer discard output or wait on work it did
 /// not create.
 fn clear_abandoned_socket_work(state: &mut RuntimeState, activity: &mut RuntimeActivity) {
+    activity.turn_timing.reset();
     activity.discarding_output = false;
     state.recovery_reply_pending = false;
 
@@ -2087,6 +2096,9 @@ fn note_candidate_audio_frame(
     now: Instant,
 ) -> bool {
     let voiced = !state.paused && frame.is_some_and(media::frame_has_voice);
+    if voiced && !state.floor_held() {
+        activity.turn_timing.note_voice(now);
+    }
     if voiced
         && (state.context_compression.is_some()
             || !activity.transcribed_on_socket
@@ -2766,6 +2778,13 @@ pub(crate) async fn run_room_with_slot(
         }
     }
     .await;
+    session::finish_turn_timing(
+        room.name().as_str(),
+        &mut turn.activity,
+        &log_clock(&turn.state),
+        timing::TimingOutcome::Ended,
+        &mut std::io::stderr().lock(),
+    );
     if let Err(error) = gemini.shutdown().await {
         eprintln!("Gemini close failed ({error}); recording received usage anyway");
     }
@@ -3455,6 +3474,19 @@ async fn apply_data_packet(
     // the page without waiting on that write.
     session::flush_framework_progress(room, context.state).await;
     let mut reply = result.generate_reply.take();
+    if let Some(summary) = context
+        .activity
+        .turn_timing
+        .finish_thinking_change(Instant::now(), result.thinking_changed)
+    {
+        session::log_turn_timing(
+            room.name().as_str(),
+            context.activity,
+            &log_clock(context.state),
+            summary,
+            &mut std::io::stderr().lock(),
+        );
+    }
     let grace = thinking_transcript_grace(interview.boot.silence_ms);
     let effects = settle_hold(context, &result, &mut reply, packet_at, grace).await;
     if effects.cut_off {
@@ -3502,6 +3534,13 @@ async fn apply_data_packet(
             Instant::now(),
         );
         if paused {
+            session::finish_turn_timing(
+                room.name().as_str(),
+                context.activity,
+                &log_clock(context.state),
+                timing::TimingOutcome::Paused,
+                &mut std::io::stderr().lock(),
+            );
             close_turns(room, context).await?;
             set_agent_state(room, context.agent_state, AGENT_STATE_LISTENING).await?;
         }

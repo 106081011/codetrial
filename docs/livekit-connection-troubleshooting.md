@@ -134,22 +134,27 @@ credential appears in this document or anywhere else in the repository.
 
 ## Resolved
 
-A full interview ran end to end on the new project. The server log is the
-evidence:
+A full interview ran end to end on the new project. These messages show a
+healthy session, with the reply entry illustrated in the current log format:
 
 ```
 joined room=interview-local identity=interviewer-interview-local
 starting interview: room=interview-local problem=two-sum duration=30min
 timing: room and Gemini session ready 0.78s after the candidate joined
-timing: 0.01s from the candidate finishing to the reply starting
+codetrial turn_timing room=interview-local ... outcome=audio
 ...
 interview ended by the browser: room=interview-local topic=control
 ```
 
-The browser joined the room, Jim answered turn after turn (`from the candidate
-finishing to the reply starting`), barge-in worked (`Gemini cut its own turn`),
+The browser joined the room, Jim answered turn after turn (`codetrial turn_timing`
+with `outcome=audio`), barge-in worked (`Gemini cut its own turn`),
 and the session ended on the candidate pressing End interview. Voice runs both
 ways: the microphone reaches the agent and Jim's audio reaches the browser.
+
+The excerpt uses the current reply-timing format; `...` omits its other fields.
+`wait_ms` ends when reply audio enters the agent's output queue, before browser
+playout. Missing speech observations remain `unknown`. See
+[Reading reply timing](turn-timing.md) for the boundaries and tool breakdown.
 
 The `Abort handler called` handshake failure did not recur once the working key
 was in place, so it was a transient interruption during the handshake rather

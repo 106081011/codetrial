@@ -337,6 +337,7 @@ recorded rather than left implicit. See
 | [Google Meet manual check](docs/meet-tab-audio-manual-check.md) | Verifying tab-audio presentation |
 | [Response window manual check](docs/integrity-response-window-check.md) | Reading a real replay's windows as a person would |
 | [LiveKit troubleshooting](docs/livekit-connection-troubleshooting.md) | Telling four connection failures apart |
+| [Reply timing](docs/turn-timing.md) | Per-turn waits, tool durations, and measurement boundaries |
 | [Observable delivery policy](docs/observable-delivery-policy.md) | What a report may and may not assess |
 | [Interview contract versions](docs/interview-contract-versions.md) | The five versions every report carries |
 | [Evidence runtime](docs/evidence-runtime.md) | The session evidence ledger and how code and test observations are recorded |

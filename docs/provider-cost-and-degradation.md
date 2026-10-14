@@ -48,12 +48,14 @@ and die still ends the interview.
 A candidate turn, required prompt (including the opening greeting), or tool
 continuation that produces no output for 45 seconds replaces the socket even
 without a `GoAway`. `CODETRIAL_GEMINI_REPLY_TIMEOUT_S` sets that interval
-within 20 to 120 seconds. The `timing:` lines log how long each reply took to
-start; a reply the watchdog replaces is paid for twice, so an endpoint whose
-slow replies do arrive warrants a longer one. A candidate turn is timed from
-the last transcript fragment of it, and a fragment arriving within two seconds
-of a turn that said something is taken as the lagging tail of speech that turn
-already answered, so it owes nothing. The replacement, resumed or cold, carries
+within 20 to 120 seconds. The `codetrial turn_timing` summaries record observed
+reply waits; [reply timing](turn-timing.md) defines their measurement boundaries
+and unavailable observations. A reply the watchdog replaces is paid for twice,
+so an endpoint whose slow replies do arrive warrants a longer timeout. For
+recovery, a candidate turn is timed from the last transcript fragment of it,
+and a fragment arriving within two seconds of a turn that said something is
+taken as the lagging tail of speech that turn already answered, so it owes
+nothing. The replacement, resumed or cold, carries
 the unanswered reply across and publishes the same reconnecting state. A reply
 cut off mid-generation is owed too, and the replacement is told not to repeat
 what was already said. Optional editor reviews accept silence; queued audio and
