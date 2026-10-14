@@ -13,6 +13,249 @@ use crate::agent::{ThinkingHold, record_framework_evidence};
 // owns the track it is a stand-in for.
 use crate::livekit::tests::{observed_source, receive_test_run, test_output_audio};
 
+#[tokio::test]
+async fn an_unqueued_model_audio_chunk_freezes_the_speech_proxy() {
+    let start = Instant::now();
+    for mime_type in ["audio/pcm;rate=24000", "audio/unsupported"] {
+        let mut activity = RuntimeActivity::new(start);
+        activity.turn_timing.note_voice(start);
+        activity.note_candidate_finished(start, false);
+        let event = GeminiEvent::Audio {
+            bytes: vec![0, 0],
+            mime_type: mime_type.into(),
+        };
+        assert!(accept_gemini_event(&event, &mut activity, false, start));
+        let (mut output, _queued) = test_output_audio();
+        assert!(!output.capture(&[0, 0], mime_type).await.unwrap());
+        assert!(activity.turn_timing.note_audio(start, false).is_none());
+        activity
+            .turn_timing
+            .note_voice(start + Duration::from_millis(900));
+        let summary = activity
+            .turn_timing
+            .note_audio(start + Duration::from_secs(1), true)
+            .unwrap();
+        assert_eq!(summary.wait, Some(Duration::from_secs(1)));
+    }
+}
+
+#[test]
+fn late_output_transcripts_do_not_reopen_a_completed_measurement() {
+    let start = Instant::now();
+    for audio in [false, true] {
+        let mut activity = RuntimeActivity::new(start);
+        activity.note_candidate_finished(start, false);
+        let text = GeminiEvent::OutputTranscript("reply".into());
+        assert!(accept_gemini_event(&text, &mut activity, false, start));
+        if audio {
+            assert!(activity.turn_timing.note_audio(start, true).is_some());
+        }
+        assert!(accept_gemini_event(
+            &GeminiEvent::TurnComplete,
+            &mut activity,
+            false,
+            start
+        ));
+        activity.turn_timing.finish(start, TimingOutcome::NoAudio);
+        assert!(accept_gemini_event(&text, &mut activity, false, start));
+        assert!(
+            activity
+                .turn_timing
+                .finish(start, TimingOutcome::Ended)
+                .is_none()
+        );
+
+        // A real new candidate observation still allows transcript-only output.
+        activity
+            .turn_timing
+            .note_transcript(start + Duration::from_secs(2));
+        assert!(accept_gemini_event(&text, &mut activity, false, start));
+        activity
+            .turn_timing
+            .note_voice(start + Duration::from_millis(2_900));
+        let next = activity
+            .turn_timing
+            .note_audio(start + Duration::from_secs(3), true)
+            .unwrap();
+        assert_eq!(next.id, 2);
+        assert_eq!(next.wait, Some(Duration::from_secs(1)));
+    }
+}
+
+#[test]
+fn activity_before_interruption_preserves_reply_debt_and_next_turn_timing() {
+    let start = Instant::now();
+    let state = RuntimeState::default();
+    let mut activity = RuntimeActivity::new(start);
+    activity.note_candidate_finished(start, false);
+    assert!(accept_gemini_event(
+        &GeminiEvent::Text("old reply".into()),
+        &mut activity,
+        false,
+        start
+    ));
+    let voice = start + Duration::from_millis(300);
+    activity.note_candidate_voice(voice);
+    activity.turn_timing.note_voice(voice);
+    assert!(observe_voice_activity(
+        &state,
+        &mut activity,
+        true,
+        None,
+        voice,
+        true
+    ));
+    assert!(accept_gemini_event(
+        &GeminiEvent::Interrupted,
+        &mut activity,
+        false,
+        voice
+    ));
+    let (mut output, _queued) = test_output_audio();
+    cut_off_turn(&mut activity, &mut output);
+    activity
+        .turn_timing
+        .finish(voice, TimingOutcome::Interrupted);
+    assert!(!accept_gemini_event(
+        &GeminiEvent::TurnComplete,
+        &mut activity,
+        false,
+        voice
+    ));
+    // The guard rebases existing debt; it does not create debt by itself.
+    activity.owe_prompt(voice, Some("new prompt".into()));
+    let end = start + Duration::from_millis(400);
+    assert!(observe_voice_activity(
+        &state,
+        &mut activity,
+        false,
+        Some(Duration::from_secs(50)),
+        end,
+        true
+    ));
+    assert_eq!(
+        activity.prompted_at,
+        Some(end),
+        "activity end must rebase the owed prompt"
+    );
+    let next = activity
+        .turn_timing
+        .note_audio(start + Duration::from_secs(1), true)
+        .unwrap();
+    assert_eq!(next.id, 2);
+    assert_eq!(next.wait, Some(Duration::from_millis(700)));
+    assert_eq!(next.turn_close, Some(Duration::from_millis(100)));
+}
+
+#[test]
+fn timing_emission_writes_one_line_per_measurement_with_session_identity() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::for_interview(start, 0, 42);
+    activity.live_socket = 3;
+    let mut output = Vec::new();
+    finish_turn_timing(
+        "room-a",
+        &mut activity,
+        "0:01.000",
+        TimingOutcome::Audio,
+        &mut output,
+    );
+    finish_turn_timing(
+        "room-a",
+        &mut activity,
+        "0:01.100",
+        TimingOutcome::Audio,
+        &mut output,
+    );
+    finish_turn_timing(
+        "room-a",
+        &mut activity,
+        "0:01.200",
+        TimingOutcome::NoAudio,
+        &mut output,
+    );
+    activity.turn_timing.note_transcript(start);
+    finish_turn_timing(
+        "room-a",
+        &mut activity,
+        "0:02.000",
+        TimingOutcome::Paused,
+        &mut output,
+    );
+    finish_turn_timing(
+        "room-a",
+        &mut activity,
+        "0:02.100",
+        TimingOutcome::Ended,
+        &mut output,
+    );
+    let log = String::from_utf8(output).unwrap();
+    let lines = log.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].starts_with(
+            "codetrial turn_timing room=room-a session=42 socket=3 turn=1 at=0:01.000 "
+        )
+    );
+    assert!(lines[0].ends_with("outcome=audio"));
+    assert!(lines[1].contains("turn=2 at=0:02.000 "));
+    assert!(lines[1].contains("wait_ms=unknown "));
+    assert!(lines[1].ends_with("outcome=paused"));
+    assert!(log.ends_with('\n'));
+}
+
+#[test]
+fn voice_observations_preserve_runtime_and_timing_hold_filters() {
+    let start = Instant::now();
+    for (paused, held, discarding, has_audio) in [
+        (false, false, false, true),
+        (true, false, false, true),
+        (false, true, false, true),
+        (false, false, true, true),
+        (false, false, false, false),
+    ] {
+        for active in [true, false] {
+            let mut state = RuntimeState {
+                paused,
+                ..RuntimeState::default()
+            };
+            if held {
+                state.thinking_hold = ThinkingHold::Held { since: start };
+            }
+            let mut activity = RuntimeActivity::new(start);
+            activity.discarding_output = discarding;
+            activity.note_candidate_voice(start);
+            activity.turn_timing.note_voice(start);
+            let observed = observe_voice_activity(
+                &state,
+                &mut activity,
+                active,
+                Some(Duration::from_secs(5)),
+                start,
+                has_audio,
+            );
+            assert_eq!(observed, !paused && has_audio);
+            assert_eq!(activity.incoming_speech_active(start), observed && active);
+            let summary = activity.turn_timing.finish(start, TimingOutcome::NoAudio);
+            assert_eq!(summary.is_some(), !paused && !held && !discarding);
+            if let Some(summary) = summary {
+                assert_eq!(
+                    summary.turn_close_reason,
+                    if active { "not_observed" } else { "observed" }
+                );
+                assert_eq!(
+                    summary.audio_offset,
+                    if active {
+                        None
+                    } else {
+                        Some(Duration::from_secs(5))
+                    }
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn compressed_inputs_keep_the_pending_request_and_final_timer() {
     let state = RuntimeState {
@@ -124,6 +367,116 @@ fn continuity_reminders_leave_opening_default_and_inactive_inputs_alone() {
     ] {
         assert_eq!(continuity_input(&inactive, input), input);
     }
+}
+
+#[test]
+fn real_tool_dispatch_records_only_tools_before_reply_audio() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    let mut state = RuntimeState {
+        code: "return 1;".into(),
+        ..RuntimeState::default()
+    };
+    let call = GeminiFunctionCall {
+        id: "read-1".into(),
+        name: TOOL_READ_EDITOR.into(),
+        args: serde_json::json!({}),
+    };
+    activity.note_candidate_finished(start, false);
+    let response = execute_timed_tool_batch(
+        &mut state,
+        &mut activity,
+        vec![call.clone(), call.clone()],
+        0,
+        true,
+    );
+    assert!(
+        response[0].1["result"]
+            .as_str()
+            .is_some_and(|code| code.contains("return 1;"))
+    );
+    let first = activity
+        .turn_timing
+        .note_audio(start + Duration::from_secs(1), true)
+        .unwrap();
+    assert_eq!(first.tool_calls, 2);
+    assert_eq!(first.tool_wait, Some(first.tool_exec));
+    assert!(first.pre_tool.is_some());
+    execute_timed_tool_batch(
+        &mut state,
+        &mut activity,
+        vec![call.clone(), call.clone()],
+        0,
+        true,
+    );
+    assert!(
+        activity
+            .turn_timing
+            .finish(start + Duration::from_secs(2), TimingOutcome::NoAudio)
+            .is_none()
+    );
+    activity.note_candidate_finished(start + Duration::from_secs(3), false);
+    execute_timed_tool_batch(&mut state, &mut activity, vec![call.clone()], 0, false);
+    let next = activity
+        .turn_timing
+        .note_audio(start + Duration::from_secs(4), true)
+        .unwrap();
+    assert_eq!(
+        next.tool_calls, 0,
+        "discarded/held tool responses must not be carried forward"
+    );
+}
+
+#[test]
+fn timing_transcripts_follow_the_existing_late_fragment_guard() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.note_candidate_finished(start, false);
+    activity.note_output(start + Duration::from_millis(100));
+    activity.note_candidate_finished(start + Duration::from_millis(500), false);
+    let summary = activity
+        .turn_timing
+        .note_audio(start + Duration::from_millis(600), true)
+        .unwrap();
+    assert_eq!(summary.wait, Some(Duration::from_millis(600)));
+    activity
+        .turn_timing
+        .finish(start + Duration::from_secs(1), TimingOutcome::NoAudio);
+    activity.generating = false;
+    activity.turn_completed_at = Some(start + Duration::from_secs(1));
+    activity.note_candidate_finished(start + Duration::from_millis(1_500), false);
+    let next = activity
+        .turn_timing
+        .note_audio(start + Duration::from_secs(2), true)
+        .unwrap();
+    assert_eq!(
+        next.wait, None,
+        "a late completed-turn tail must not arm a new wait"
+    );
+}
+
+#[test]
+fn obsolete_completion_does_not_close_the_new_turn_timing() {
+    let start = Instant::now();
+    let mut activity = RuntimeActivity::new(start);
+    activity.note_candidate_finished(start, false);
+    activity
+        .turn_timing
+        .finish(start + Duration::from_secs(1), TimingOutcome::Interrupted);
+    activity.note_candidate_finished(start + Duration::from_secs(2), false);
+    activity.stale_turn_pending = true;
+    assert!(!accept_gemini_event(
+        &GeminiEvent::TurnComplete,
+        &mut activity,
+        false,
+        start + Duration::from_secs(3)
+    ));
+    let summary = activity
+        .turn_timing
+        .note_audio(start + Duration::from_secs(4), true)
+        .unwrap();
+    assert_eq!(summary.id, 2);
+    assert_eq!(summary.wait, Some(Duration::from_secs(2)));
 }
 
 /// Closing a turn yields what to publish, once, and only for an open one.

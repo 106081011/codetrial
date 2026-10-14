@@ -573,8 +573,12 @@ pub enum GeminiEvent {
     },
     Text(String),
     InputTranscript(String),
-    /// Provider-detected candidate speech started (true) or ended (false).
-    CandidateVoiceActivity(bool),
+    /// Provider-detected candidate speech, with an optional offset on the
+    /// provider audio clock rather than this host's monotonic clock.
+    CandidateVoiceActivity {
+        active: bool,
+        audio_offset: Option<Duration>,
+    },
     OutputTranscript(String),
     TurnComplete,
     Interrupted,
@@ -2267,6 +2271,24 @@ fn is_setup_complete_text(text: &str) -> bool {
         .is_some_and(|message| message.get("setupComplete").is_some())
 }
 
+fn voice_activity(message: &Value) -> Option<GeminiEvent> {
+    let activity = message.get("voiceActivity")?;
+    match activity.get("type").and_then(Value::as_str)? {
+        "ACTIVITY_START" | "ACTIVITY_END" => {}
+        _ => return None,
+    }
+    let audio_offset = activity
+        .get("audioOffset")
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_suffix('s'))
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+    Some(GeminiEvent::CandidateVoiceActivity {
+        active: activity["type"] == "ACTIVITY_START",
+        audio_offset,
+    })
+}
+
 fn websocket_message_text(message: Message) -> Option<String> {
     match message {
         Message::Text(text) => Some(text.to_string()),
@@ -2298,14 +2320,6 @@ fn parse_server_message(text: &str) -> ServerMessage {
         return ServerMessage::default();
     };
     let mut events = Vec::new();
-    match message
-        .pointer("/voiceActivity/type")
-        .and_then(Value::as_str)
-    {
-        Some("ACTIVITY_START") => events.push(GeminiEvent::CandidateVoiceActivity(true)),
-        Some("ACTIVITY_END") => events.push(GeminiEvent::CandidateVoiceActivity(false)),
-        _ => {}
-    }
     let interrupted = message
         .pointer("/serverContent/interrupted")
         .and_then(Value::as_bool)
@@ -2330,9 +2344,9 @@ fn parse_server_message(text: &str) -> ServerMessage {
         .filter(|handle| !handle.is_empty())
         .map(str::to_string);
 
-    // A request to keep the floor in this frame must reach the room before any
-    // generated reply sharing it. In an interrupted frame it waits instead for
-    // the old turn to be torn down, below.
+    // The room's speech-debt guard must see activity before an interruption
+    // tears down the unfinished reply. Timing rollover preserves this order.
+    events.extend(voice_activity(&message));
     if !interrupted && let Some(text) = input_transcript {
         events.push(GeminiEvent::InputTranscript(text.to_string()));
     }
@@ -2379,8 +2393,10 @@ fn parse_server_message(text: &str) -> ServerMessage {
     }
 
     // Gemini's interrupted turn ends after the interruption. A frame carrying
-    // both must preserve that order; candidate speech in the same frame owns
-    // the next reply, so it is recorded after the old turn is torn down.
+    // both must preserve that order; candidate transcription in the same frame
+    // owns the next reply, so it follows the old turn's teardown. Voice
+    // activity remains earlier because the room's speech-debt guard needs that
+    // order.
     if interrupted {
         events.push(GeminiEvent::Interrupted);
     }

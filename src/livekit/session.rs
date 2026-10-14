@@ -33,6 +33,7 @@ use crate::runtime::{
 
 use super::board::{self, Board};
 use super::media::{CandidateMedia, OutputAudio};
+use super::timing::TimingOutcome;
 use super::turn::{Floor, Interruptible, RuntimeActivity, SpeakerTurns, TurnState, closing_order};
 use super::{
     AGENT_STATE_LISTENING, AGENT_STATE_SPEAKING, AGENT_STATE_THINKING, LIVEKIT_AGENT_STATE,
@@ -549,7 +550,7 @@ pub(super) fn answers_prompt(event: &GeminiEvent) -> bool {
         GeminiEvent::Text(text) | GeminiEvent::OutputTranscript(text) => !text.trim().is_empty(),
         GeminiEvent::UsageRecorded
         | GeminiEvent::InputTranscript(_)
-        | GeminiEvent::CandidateVoiceActivity(_)
+        | GeminiEvent::CandidateVoiceActivity { .. }
         | GeminiEvent::TurnComplete
         | GeminiEvent::Interrupted
         | GeminiEvent::GoAway { .. } => false,
@@ -663,6 +664,15 @@ pub(super) fn accept_gemini_event(
             if !activity.discarding_output {
                 if answers_prompt(event) {
                     activity.note_output(now);
+                    match event {
+                        GeminiEvent::OutputTranscript(_) => {
+                            activity.turn_timing.note_output_transcript()
+                        }
+                        GeminiEvent::Text(_) | GeminiEvent::Audio { .. } => {
+                            activity.turn_timing.note_model_output()
+                        }
+                        _ => {}
+                    }
                 } else if ends_turn(event) {
                     let said_something = activity.generating;
                     activity.note_turn_boundary(now);
@@ -686,11 +696,20 @@ pub(super) async fn handle_gemini_event(
     event: GeminiEvent,
     interruptible: Interruptible,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let GeminiEvent::CandidateVoiceActivity(active) = event {
-        if !context.state.paused && context.media.audio.is_some() {
-            context
-                .activity
-                .note_candidate_voice_activity(active, Instant::now());
+    if let GeminiEvent::CandidateVoiceActivity {
+        active,
+        audio_offset,
+    } = event
+    {
+        let now = Instant::now();
+        if observe_voice_activity(
+            context.state,
+            context.activity,
+            active,
+            audio_offset,
+            now,
+            context.media.audio.is_some(),
+        ) {
             eprintln!(
                 "timing: candidate voice_activity={} at={} room={}",
                 if active { "started" } else { "ended" },
@@ -720,6 +739,7 @@ pub(super) async fn handle_gemini_event(
     let discarding = context.activity.discarding_output;
     let handled = if accept_gemini_event(&event, context.activity, held, Instant::now()) {
         if silent_answer && !context.activity.owes_reply() {
+            context.activity.turn_timing.note_model_output();
             eprintln!(
                 "timing: Gemini completed a turn with no output; the owed reply is taken as a deliberate silence at={} room={}",
                 log_clock(context.state),
@@ -796,6 +816,28 @@ pub(super) async fn handle_gemini_event(
     handled
 }
 
+fn observe_voice_activity(
+    state: &RuntimeState,
+    activity: &mut RuntimeActivity,
+    active: bool,
+    audio_offset: Option<Duration>,
+    now: Instant,
+    has_audio: bool,
+) -> bool {
+    let observed = !state.paused && has_audio;
+    if observed {
+        activity.note_candidate_voice_activity(active, now);
+    }
+    if !state.floor_held() && !activity.discarding_output {
+        if active {
+            activity.turn_timing.note_activity_start(now);
+        } else {
+            activity.turn_timing.note_activity_end(now, audio_offset);
+        }
+    }
+    observed
+}
+
 /// What a turn's end settles about a hold: a spoken request whose utterance
 /// has ended stands, and a candidate holding the floor is owed no reply.
 pub(super) fn settle_hold_at_turn_end(state: &mut RuntimeState, activity: &mut RuntimeActivity) {
@@ -815,10 +857,14 @@ async fn on_tool_calls(
     if calls.is_empty() {
         return Ok(());
     }
-    let answers = execute_tool_batch(
+    let timed = !context.state.floor_held() && !context.activity.discarding_output;
+    let reviewed_revision = context.activity.substantive_revision_at_last_review;
+    let answers = execute_timed_tool_batch(
         context.state,
+        context.activity,
         calls,
-        context.activity.substantive_revision_at_last_review,
+        reviewed_revision,
+        timed,
     );
     let editor_review_revision = answers
         .iter()
@@ -883,7 +929,14 @@ async fn on_tool_calls(
     // Not `?`. A response that did not go out is owed nothing back, so the flag
     // stays down, and the socket it failed on is replaced when its close is
     // reported; the checklist below still reflects the calls.
+    let started = Instant::now();
     let sent = context.gemini.send_tool_responses(&answers).await;
+    if timed {
+        context
+            .activity
+            .turn_timing
+            .note_tool_response(started, Instant::now(), sent.is_ok());
+    }
     if let Some(revision) = editor_review_revision {
         eprintln!(
             "codetrial live_editor_review room={} revision={revision} sent={}",
@@ -954,6 +1007,9 @@ async fn on_input_transcript(
         context
             .activity
             .note_candidate_finished(Instant::now(), context.output_audio.is_playing());
+        if context.state.floor_held() {
+            context.activity.turn_timing.reset();
+        }
 
         // The wait the room was shown is over once the candidate talks again:
         // the floor is theirs, and the watch tick shows it again if their new
@@ -977,6 +1033,13 @@ async fn on_input_transcript(
             );
         }
         if !was_thinking && context.state.thinking_hold.is_active() {
+            finish_turn_timing(
+                room.name().as_str(),
+                context.activity,
+                &log_clock(context.state),
+                TimingOutcome::Held,
+                &mut std::io::stderr().lock(),
+            );
             context.state.thinking_unheard_reply |= context.activity.floor != Floor::Listening;
             cut_off_for_hold(context.activity, context.output_audio);
             set_agent_state(room, context.agent_state, AGENT_STATE_LISTENING).await?;
@@ -1018,6 +1081,34 @@ async fn on_input_transcript(
     Ok(())
 }
 
+/// Emits only numbers and identifiers, never transcript or tool arguments.
+pub(super) fn finish_turn_timing(
+    room: &str,
+    activity: &mut RuntimeActivity,
+    clock: &str,
+    outcome: TimingOutcome,
+    output: &mut impl std::io::Write,
+) {
+    if let Some(summary) = activity.turn_timing.finish(Instant::now(), outcome) {
+        log_turn_timing(room, activity, clock, summary, output);
+    }
+}
+
+pub(super) fn log_turn_timing(
+    room: &str,
+    activity: &RuntimeActivity,
+    clock: &str,
+    summary: super::timing::TimingSummary,
+    output: &mut impl std::io::Write,
+) {
+    writeln!(
+        output,
+        "{}",
+        summary.log_line(room, activity.live_session_id, activity.live_socket, clock)
+    )
+    .expect("failed to write turn timing");
+}
+
 /// A chunk of the interviewer's voice, queued for the room.
 async fn on_generated_audio(
     room: &Room,
@@ -1026,16 +1117,6 @@ async fn on_generated_audio(
     mime_type: &str,
     interruptible: Interruptible,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Read before the interrupt below, because that is the point the candidate
-    // stops waiting. Stamped on the last input transcript fragment, so it
-    // covers endpointing plus model latency plus anything still queued ahead of
-    // the reply: the silence the candidate actually sits through.
-    //
-    // `None` means Gemini is answering something it never transcribed, and
-    // there is no moment the candidate finished to measure from. Printing
-    // anything then is worse than printing nothing.
-    let waited = context.activity.awaiting_reply_since;
-
     // A new turn's first chunk while the previous one is still draining.
     // `InputTranscript` normally clears the queue before this point, so
     // reaching here means Gemini answered something it never transcribed.
@@ -1048,16 +1129,21 @@ async fn on_generated_audio(
     if context.output_audio.accepts(bytes, mime_type) {
         drop_stale_playout(room, context, interruptible).await?;
     }
-    if context.output_audio.capture(bytes, mime_type).await? {
-        // Cleared here rather than where it is read: a chunk `capture` rejects
-        // is not the reply starting, and consuming the stamp on one would lose
-        // the measurement for the chunk that is.
-        if let Some(since) = waited {
-            eprintln!(
-                "timing: {:.2}s from the candidate finishing to the reply starting",
-                since.elapsed().as_secs_f64()
-            );
-        }
+    let captured = context.output_audio.capture(bytes, mime_type).await?;
+    if let Some(summary) = context
+        .activity
+        .turn_timing
+        .note_audio(Instant::now(), captured)
+    {
+        log_turn_timing(
+            room.name().as_str(),
+            context.activity,
+            &log_clock(context.state),
+            summary,
+            &mut std::io::stderr().lock(),
+        );
+    }
+    if captured {
         context.activity.note_reply_audible();
 
         // Speech is queued, not played: the floor stays busy until the buffered
@@ -1126,6 +1212,13 @@ async fn on_turn_complete(
     room: &Room,
     context: &mut GeminiEventContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    finish_turn_timing(
+        room.name().as_str(),
+        context.activity,
+        &log_clock(context.state),
+        TimingOutcome::NoAudio,
+        &mut std::io::stderr().lock(),
+    );
     settle_hold_at_turn_end(context.state, context.activity);
 
     // The gap between Gemini finishing and the queue emptying. Gemini
@@ -1199,6 +1292,13 @@ async fn on_interruption(
         );
         return on_turn_complete(room, context).await;
     };
+    finish_turn_timing(
+        room.name().as_str(),
+        context.activity,
+        &log_clock(context.state),
+        TimingOutcome::Interrupted,
+        &mut std::io::stderr().lock(),
+    );
 
     // What Gemini heard is the whole diagnosis. It interrupts on its own voice
     // activity detection, so a cut with the candidate mid-sentence is barge-in
@@ -1283,6 +1383,21 @@ fn agent_state_attributes(
     attributes
 }
 
+fn execute_timed_tool_batch(
+    state: &mut RuntimeState,
+    activity: &mut RuntimeActivity,
+    calls: Vec<GeminiFunctionCall>,
+    reviewed_revision: u64,
+    timed: bool,
+) -> Vec<(GeminiFunctionCall, serde_json::Value)> {
+    execute_tool_batch_observed(state, calls, reviewed_revision, |started, finished| {
+        if timed {
+            activity.turn_timing.note_tool_request(started);
+            activity.turn_timing.note_tool_execution(started, finished);
+        }
+    })
+}
+
 /// Public so the behaviour check in `tests/interview_behavior.rs` answers a
 /// text model's tool calls with this dispatch rather than a copy of it.
 pub fn execute_tool_call(state: &mut RuntimeState, call: &GeminiFunctionCall) -> serde_json::Value {
@@ -1326,6 +1441,15 @@ pub(super) fn execute_tool_batch(
     calls: Vec<GeminiFunctionCall>,
     reviewed_revision: u64,
 ) -> Vec<(GeminiFunctionCall, serde_json::Value)> {
+    execute_tool_batch_observed(state, calls, reviewed_revision, |_, _| {})
+}
+
+fn execute_tool_batch_observed(
+    state: &mut RuntimeState,
+    calls: Vec<GeminiFunctionCall>,
+    reviewed_revision: u64,
+    mut observe: impl FnMut(Instant, Instant),
+) -> Vec<(GeminiFunctionCall, serde_json::Value)> {
     let review_changed = editor_review_allowed(state)
         && state.code != state.code_shown
         && state.evidence_ledger.code.substantive_revision > reviewed_revision;
@@ -1342,12 +1466,14 @@ pub(super) fn execute_tool_batch(
         .into_iter()
         .enumerate()
         .map(|(index, call)| {
+            let started = Instant::now();
             let response = execute_tool_call_with_continuity(
                 state,
                 &call,
                 Some(index) == last_continuity,
                 Some(index) == last_framework,
             );
+            observe(started, Instant::now());
             (call, response)
         })
         .collect::<Vec<_>>();
