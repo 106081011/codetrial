@@ -6,6 +6,42 @@
 
 use super::*;
 
+#[test]
+fn preflight_interviewer_choices_match_server_choices() {
+    let html = fs::read_to_string("web/interview.html").unwrap();
+    for (id, choices) in [
+        ("interviewer-voice", codetrial::agent::INTERVIEWER_VOICES),
+        ("interviewer-accent", codetrial::agent::INTERVIEWER_ACCENTS),
+    ] {
+        let opening = format!("<select id=\"{id}\">");
+        let select = html
+            .split_once(&opening)
+            .expect("the interviewer selector must exist")
+            .1
+            .split_once("</select>")
+            .expect("the interviewer selector must have a closing boundary")
+            .0;
+        let values: Vec<_> = select
+            .split("<option")
+            .skip(1)
+            .map(|option| {
+                let tag = option.split_once('>').expect("an option must close").0;
+                tag.split_once("value=\"")
+                    .expect("each option must have a value")
+                    .1
+                    .split_once('"')
+                    .expect("the option value must close")
+                    .0
+            })
+            .collect();
+        let expected: Vec<_> = std::iter::once("")
+            .chain(choices.iter().copied())
+            .chain(std::iter::once("Random"))
+            .collect();
+        assert_eq!(values, expected, "{id} must match the server's choices");
+    }
+}
+
 #[tokio::test]
 async fn static_home_markup_matches_frontend_contract() {
     let (base, server) = spawn_web_server(WebServerConfig {
@@ -221,7 +257,7 @@ fn static_interview_script_leaves_candidate_identity_to_the_server() {
     let source = fs::read_to_string("web/interview.js").unwrap();
 
     assert!(compact(&source).contains(
-        "JSON.stringify({problemId:problem.page,durationMin,interviewId,interviewLoop,interviewMode:mode,interviewProfile,...(interviewGrounding?{interviewGrounding}:{}),...(nodes.hideExamples.checked?{hideExamples:true}:{}),...(!editorOptions.execution?{codeExecution:false}:{})})"
+        "JSON.stringify({problemId:problem.page,durationMin,interviewId,interviewLoop,interviewMode:mode,interviewProfile,...(interviewGrounding?{interviewGrounding}:{}),...(nodes.interviewerAccent.value?{interviewerAccent:nodes.interviewerAccent.value}:{}),...(nodes.interviewerVoice.value?{interviewerVoice:nodes.interviewerVoice.value}:{}),...(nodes.hideExamples.checked?{hideExamples:true}:{}),...(!editorOptions.execution?{codeExecution:false}:{})})"
     ));
     assert!(!source.contains("candidateIdentity"));
 }

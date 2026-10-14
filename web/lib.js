@@ -819,8 +819,8 @@ const textEncoder = new TextEncoder();
 /// function-local, moving it left the whole suite green with the supported-card
 /// branch no longer rendering, which is the defect a local constant invites.
 export const ACTIVE_CONTRACT = {
-  bundleVersion: 33,
-  livePromptVersion: 24,
+  bundleVersion: 34,
+  livePromptVersion: 25,
   reportPromptVersion: 20,
   reportSchemaVersion: 3,
   rubricVersion: 1,
@@ -1102,6 +1102,12 @@ function reportPracticeLevel(raw) {
     : null;
 }
 
+function reportInterviewerStyle(value) {
+  const text =
+    typeof value === "string" ? boundedText(value.trim(), 128).trim() : "";
+  return text && text !== "Random" ? text : undefined;
+}
+
 export function sanitizeReport(raw) {
   const { interviewContract, unsupported: unsupportedContract } =
     reportContract(raw);
@@ -1286,6 +1292,8 @@ export function sanitizeReport(raw) {
   const debrief = reportDebrief(raw);
   const topics = reportTopics(raw);
   const practiceLevel = reportPracticeLevel(raw);
+  const interviewerVoice = reportInterviewerStyle(raw?.interviewerVoice);
+  const interviewerAccent = reportInterviewerStyle(raw?.interviewerAccent);
 
   // A report with nothing in it must survive normalization as a report with
   // nothing in it. Falling through to the fields below would score the missing
@@ -1313,6 +1321,8 @@ export function sanitizeReport(raw) {
       debrief,
       topics,
       practiceLevel,
+      interviewerVoice,
+      interviewerAccent,
       improvementPlan: [],
       frameworkAssessment: null,
       frameworkEvidence,
@@ -1346,6 +1356,8 @@ export function sanitizeReport(raw) {
     debrief,
     topics,
     practiceLevel,
+    interviewerVoice,
+    interviewerAccent,
   };
 }
 

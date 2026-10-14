@@ -3080,6 +3080,8 @@ fn candidate_bootstrap<'a>(
         Some(candidate.problem.id),
         candidate.duration_min,
         crate::runtime::RuntimeOptions {
+            voice: candidate.voice,
+            accent: candidate.accent,
             profile: candidate.profile,
             grounding: candidate.grounding,
             interview_loop: candidate.interview_loop,

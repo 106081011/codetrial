@@ -350,6 +350,8 @@ pub fn build_instructions_for_plan(
     options: &crate::runtime::RuntimeOptions,
 ) -> String {
     let &crate::runtime::RuntimeOptions {
+        voice: _,
+        accent,
         ref profile,
         ref grounding,
         interview_loop,
@@ -528,7 +530,7 @@ policies, which come out of the conversation as they would with a person."
     .filter(|policy| !policy.is_empty())
     .collect::<Vec<_>>()
     .join("\n\n");
-    format!(
+    let mut instructions = format!(
         r#"You are {AGENT_NAME}, a senior staff software engineer running a live, spoken,
 {duration_min}-minute {interview_surface} interview over video. {opening}
 
@@ -662,7 +664,11 @@ TOOLS
 
 Be warm but rigorous: want the candidate to succeed, never do the work for them."#,
         metadata.difficulty, optimal_point, pitfalls_point,
-    )
+    );
+    if let Some(direction) = accent.and_then(super::interviewer_accent_instruction) {
+        instructions.push_str(&direction);
+    }
+    instructions
 }
 
 fn grounding_policy(grounding: &InterviewGrounding) -> String {

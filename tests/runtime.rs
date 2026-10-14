@@ -115,9 +115,9 @@ fn bootstrap_owns_validated_round_plan_and_budgets() {
     );
     assert_eq!((coding.coding_minutes, coding.behavioral_minutes), (45, 0));
     assert!(
-        !coding
+        coding
             .instructions
-            .contains("STAR BEHAVIORAL CLOSE — use only after")
+            .contains("coding only. The REACTO coding round owns all 45 minutes.")
     );
     let combined = bootstrap_with_rounds(
         &config,
@@ -136,7 +136,51 @@ fn bootstrap_owns_validated_round_plan_and_budgets() {
         (combined.coding_minutes, combined.behavioral_minutes),
         (22, 8)
     );
-    assert!(combined.instructions.contains("two rounds"));
+    assert!(combined.instructions.contains(
+        "two rounds: the REACTO coding round has 22 minutes and the STAR behavioral reserve has 8 minutes."
+    ));
+}
+
+#[test]
+fn bootstrap_preserves_example_visibility_with_an_accent() {
+    let config = config();
+    for accent in [None, Some("British")] {
+        for examples_hidden in [false, true] {
+            let boot = bootstrap_with_rounds(
+                &config,
+                "interview-fixed",
+                Some("two-sum"),
+                45,
+                RuntimeOptions {
+                    accent,
+                    examples_hidden,
+                    ..RuntimeOptions::default()
+                },
+            );
+            assert_eq!(
+                boot.instructions
+                    .contains("none are on their screen: never point them at an example."),
+                examples_hidden,
+                "accent={accent:?}, examples_hidden={examples_hidden}"
+            );
+            assert_eq!(
+                boot.instructions
+                    .contains("implement and one or two worked examples"),
+                !examples_hidden,
+                "accent={accent:?}, examples_hidden={examples_hidden}"
+            );
+            assert_eq!(
+                boot.instructions.contains("natural British accent"),
+                accent.is_some()
+            );
+            assert_eq!(
+                boot.instructions
+                    .matches("[INTERVIEWER SPEAKING STYLE]")
+                    .count(),
+                usize::from(accent.is_some())
+            );
+        }
+    }
 }
 
 #[test]
@@ -158,6 +202,7 @@ fn bootstrap_preserves_python_gemini_defaults_and_prompts() {
     assert_eq!(bootstrap.live_model, DEFAULT_GEMINI_LIVE_MODEL);
     assert_eq!(bootstrap.report_model, DEFAULT_GEMINI_REPORT_MODEL);
     assert_eq!(bootstrap.voice, DEFAULT_GEMINI_VOICE);
+    assert_eq!(bootstrap.accent, None);
     assert!(
         bootstrap
             .instructions

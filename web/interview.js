@@ -546,6 +546,8 @@ const nodes = {
   audioJoin: document.querySelector("#audio-check-join"),
   audioLeave: document.querySelector("#audio-check-leave"),
   meetPresentation: document.querySelector("#meet-presentation"),
+  interviewerAccent: document.querySelector("#interviewer-accent"),
+  interviewerVoice: document.querySelector("#interviewer-voice"),
   hideExamples: document.querySelector("#hide-examples"),
   recordingConsentStep: document.querySelector("#recording-consent-step"),
   recordingConsent: document.querySelector("#recording-consent"),
@@ -1340,6 +1342,12 @@ async function connect(preflight, presenting = false) {
         interviewMode: mode,
         interviewProfile,
         ...(interviewGrounding ? { interviewGrounding } : {}),
+        ...(nodes.interviewerAccent.value
+          ? { interviewerAccent: nodes.interviewerAccent.value }
+          : {}),
+        ...(nodes.interviewerVoice.value
+          ? { interviewerVoice: nodes.interviewerVoice.value }
+          : {}),
         ...(nodes.hideExamples.checked ? { hideExamples: true } : {}),
         ...(!editorOptions.execution ? { codeExecution: false } : {}),
       }),
