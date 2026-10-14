@@ -76,6 +76,7 @@ import {
   roomInterviewer,
   sanitizeReport,
   sessionReport,
+  SHOW_SOURCES_KEY,
   testPayload,
   timeWarningPayload,
   topics,
@@ -2036,6 +2037,7 @@ function renderProblem() {
   recordStage();
   nodes.problemPanel.innerHTML = problemMarkup(problem, {
     examples: !nodes.hideExamples.checked,
+    showSources: readStored(SHOW_SOURCES_KEY) === "1",
   });
 }
 

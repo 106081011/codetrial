@@ -1105,17 +1105,20 @@ test("report markup marks a no-hire and an empty editor", () => {
 });
 
 test("problem markup escapes every field a problem carries", () => {
-  const body = problemMarkup({
-    source: "<script>t</script>",
-    brief: ["<script>s</script>"],
-    examples: [
-      {
-        input: "<script>i</script>",
-        output: "<script>o</script>",
-        explanation: "<script>x</script>",
-      },
-    ],
-  });
+  const body = problemMarkup(
+    {
+      source: "<script>t</script>",
+      brief: ["<script>s</script>"],
+      examples: [
+        {
+          input: "<script>i</script>",
+          output: "<script>o</script>",
+          explanation: "<script>x</script>",
+        },
+      ],
+    },
+    { showSources: true },
+  );
 
   assert.doesNotMatch(
     body,
@@ -1143,19 +1146,39 @@ test("problem markup shows the scenario and leaves the limits to be asked for", 
 });
 
 test("problem markup names the published title once, small, and only when it has one", () => {
-  const body = problemMarkup({
-    source: "Two Sum",
-    brief: ["Match the disputed charge."],
-    examples: [{ input: "a", output: "b" }],
-  });
+  const body = problemMarkup(
+    {
+      source: "Two Sum",
+      brief: ["Match the disputed charge."],
+      examples: [{ input: "a", output: "b" }],
+    },
+    { showSources: true },
+  );
   assert.equal(body.match(/Two Sum/g).length, 1);
   assert.match(body, /<p class="problem-source">LeetCode: Two Sum<\/p>/);
 
-  const unnamed = problemMarkup({
+  const unnamed = problemMarkup(
+    {
+      brief: ["one"],
+      examples: [{ input: "a", output: "b" }],
+    },
+    { showSources: true },
+  );
+  assert.doesNotMatch(unnamed, /problem-source|LeetCode|undefined/);
+});
+
+test("problem markup hides published titles by default", () => {
+  const problem = {
+    source: "Two Sum",
     brief: ["one"],
     examples: [{ input: "a", output: "b" }],
-  });
-  assert.doesNotMatch(unnamed, /problem-source|LeetCode|undefined/);
+  };
+
+  assert.doesNotMatch(problemMarkup(problem), /LeetCode:/);
+  assert.match(
+    problemMarkup(problem, { showSources: true }),
+    /LeetCode: Two Sum/,
+  );
 });
 
 test("problem markup omits the explanation line rather than printing undefined", () => {
