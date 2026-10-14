@@ -1243,7 +1243,10 @@ p {
   --editor-gutter: max(3.25rem, calc(var(--editor-font-size) * 3.72));
   position: relative;
   flex: 1;
-  min-height: 25rem;
+  /* The test drawer's splitter owns the lower bound once the candidate sizes
+     the two panes. The old 25rem flex minimum prevented the drawer from
+     reaching its bound and made the panel overflow. */
+  min-height: 6rem;
   background: var(--code-bg);
 }
 
@@ -1409,8 +1412,17 @@ p {
 }
 
 .test-drawer {
+  display: flex;
+  flex: 0 0 var(--test-drawer-height, auto);
+  min-height: 0;
+  flex-direction: column;
+  overflow-y: auto;
   border-top: 1px solid var(--hairline);
   background: var(--surface);
+}
+
+.test-drawer:has(#results-body[hidden]) {
+  flex-basis: auto;
 }
 
 #results-toggle {
@@ -1426,7 +1438,9 @@ p {
 }
 
 .results-body {
-  max-height: 14rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: var(--test-drawer-height, 14rem);
   overflow-y: auto;
   border-top: 1px solid var(--hairline);
   padding: 0.75rem 1rem;
@@ -1632,6 +1646,20 @@ table.phase-scores {
 .splitter[aria-orientation="vertical"] {
   background-size: 2px 100%;
   cursor: col-resize;
+}
+
+.splitter[aria-orientation="horizontal"] {
+  background-size: 100% 2px;
+  cursor: row-resize;
+}
+
+.test-drawer-resizer {
+  display: block;
+  flex: 0 0 1rem;
+}
+
+.test-drawer-resizer:has(+ .test-drawer #results-body[hidden]) {
+  display: none;
 }
 
 .splitter:hover,

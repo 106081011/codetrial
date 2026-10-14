@@ -210,6 +210,7 @@ const HIDE_EXAMPLES_KEY = "codetrial:hideExamples";
 const EDITOR_FONT_SIZE_KEY = "codetrial:editorFontSize";
 const EDITOR_THEME_KEY = "codetrial:editorTheme";
 const SIDEBAR_WIDTH_KEY = "codetrial:sidebarWidth";
+const TEST_DRAWER_HEIGHT_KEY = "codetrial:testDrawerHeight";
 // The sidebar's narrowest is the width it had before it could be resized. The
 // panel beside it keeps more than its widest toolbar item, the row of language
 // tabs, needs, so the toolbar wraps but nothing in it is cut off.
@@ -512,6 +513,8 @@ const nodes = {
   compileDisclosure: document.querySelector(".compile-disclosure"),
   run: document.querySelector("#run-tests"),
   testDrawer: document.querySelector(".test-drawer"),
+  testDrawerResizer: document.querySelector("#test-drawer-resizer"),
+  candidateCase: document.querySelector("#candidate-case"),
   candidateCaseInput: document.querySelector("#candidate-case-input"),
   candidateCaseExpected: document.querySelector("#candidate-case-expected"),
   candidateCaseAdd: document.querySelector("#candidate-case-add"),
@@ -629,6 +632,17 @@ async function init() {
     storageKey: SIDEBAR_WIDTH_KEY,
     bounds: sidebarBounds,
   });
+  attachSplitter({
+    handle: nodes.testDrawerResizer,
+    pane: nodes.testDrawer,
+    axis: "y",
+    side: "after",
+    target: nodes.editorPanel,
+    property: "--test-drawer-height",
+    storageKey: TEST_DRAWER_HEIGHT_KEY,
+    bounds: testDrawerBounds,
+    resizeTargets: [nodes.editorStack, nodes.editorToolbar],
+  });
   compactJimStageBesideNarrowPanel(
     whiteboard ? nodes.boardPanel : nodes.editorPanel,
   );
@@ -677,6 +691,7 @@ async function init() {
 
 function renderRuntimeConfig() {
   nodes.run.hidden = !editorOptions.execution;
+  nodes.testDrawerResizer.hidden = !editorOptions.execution;
   nodes.testDrawer.hidden = !editorOptions.execution;
   // No origin literal here: /runtime-config.js supplies it, and the server is
   // the only place that may name it, because the same value builds the CSP.
@@ -3542,6 +3557,30 @@ function sidebarBounds() {
       SIDEBAR_MIN_REM * rem,
       Math.min(window.innerWidth / 2, room - SIDEBAR_NEIGHBOUR_MIN_REM * rem),
     ),
+  };
+}
+
+/// How tall the test drawer may be. Its two toggles remain visible at the
+/// minimum. At the maximum only a short, still usable editor remains, so long
+/// output can fill almost all of the coding area. Their heights are summed
+/// because that is the room the divider trades between them.
+function testDrawerBounds() {
+  const drawerTop = nodes.testDrawer.getBoundingClientRect().top;
+  const min =
+    nodes.candidateCase.getBoundingClientRect().bottom -
+    drawerTop +
+    nodes.resultsToggle.getBoundingClientRect().height;
+  const room =
+    nodes.editorPanel.clientHeight -
+    nodes.editorToolbar.offsetHeight -
+    nodes.testDrawerResizer.offsetHeight;
+  const rootFontSize = Number.parseFloat(
+    getComputedStyle(document.documentElement).fontSize,
+  );
+  const editorMin = rootFontSize * 6;
+  return {
+    min,
+    max: Math.max(min, room - editorMin),
   };
 }
 
