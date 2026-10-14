@@ -253,7 +253,16 @@
             aria-label="Code editor"
           ></textarea>
         </div>
-        <section class="test-drawer">
+        <div
+          id="test-drawer-resizer"
+          class="splitter test-drawer-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize test panel"
+          aria-controls="test-drawer"
+          tabindex="0"
+        ></div>
+        <section id="test-drawer" class="test-drawer">
           <details id="candidate-case">
             <summary>Add a case</summary>
             <label

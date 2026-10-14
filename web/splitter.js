@@ -59,7 +59,9 @@ export function storedSize(key, storage) {
 /// after the divider. The size reaches the layout as a pixel length in the
 /// custom property `property` on `target`, so the stylesheet decides what the
 /// length means and what applies while there is none. `bounds()` answers
-/// `{ min, max }` in pixels for the window as it is now.
+/// `{ min, max }` in pixels for the window as it is now. Elements in
+/// `resizeTargets` can change that room without resizing the window, so they
+/// trigger the same reclamping when their boxes change.
 ///
 /// The candidate's choice and the size on show are kept apart. A window that
 /// shrinks clamps what is shown and leaves the choice alone, so widening it
@@ -75,6 +77,7 @@ export function attachSplitter({
   storageKey,
   bounds,
   storage,
+  resizeTargets = [],
 }) {
   const { client, extent } = AXES[axis];
   let chosen = storedSize(storageKey, storage);
@@ -95,8 +98,7 @@ export function attachSplitter({
     frame = 0;
     if (chosen === null) target.style.removeProperty(property);
     else target.style.setProperty(property, `${clampSize(chosen, limits)}px`);
-    const now =
-      chosen === null ? Math.round(measured()) : clampSize(chosen, limits);
+    const now = Math.round(measured());
     handle.setAttribute(
       "aria-valuemin",
       String(Math.min(Math.round(limits.min), now)),
@@ -177,4 +179,10 @@ export function attachSplitter({
   handle.addEventListener("dblclick", () => choose(null));
   window.addEventListener("resize", () => show());
   show();
+  if (window.ResizeObserver && resizeTargets.length) {
+    const observer = new ResizeObserver(() => {
+      frame ||= requestAnimationFrame(() => show());
+    });
+    for (const element of resizeTargets) observer.observe(element);
+  }
 }
